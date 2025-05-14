@@ -1,0 +1,30 @@
+defaults:
+  - hydra: default
+  - model: default
+  - trainer: bcp
+  - optimizer: adam
+  - scheduler: constant
+  - tracker: weights
+  - _self_
+
+out_dir : out/static  # Directory to save model and log files.
+
+# RNG
+seed: False  # Random seed. If False, use random seed
+
+# Performance
+device : 'gpu'  # 'cpu' or 'gpu'
+gpu_id : 0      # GPU ID to use
+precision: float32  # float16, float32 or bfloat16
+
+# Training
+epochs: 50
+batchsize: 100
+eval_interval: 1
+verbose: True
+OL_eval_on_train: True  # Whether to evaluate on a subset of the training set 
+                        # in open-loop evaluation.
+
+# Tracking & Debug options
+batchwise_tracker: False  # Whether to track on a batch-wise basis
+tracking: True

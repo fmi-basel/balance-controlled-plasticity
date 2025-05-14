@@ -1,0 +1,17 @@
+defaults:
+  - vf: assemblies
+  - _self_
+
+_target_: bcp.core.Model
+stateful: False
+
+# Diffrax parameters
+dt: 1e-3
+T: 2.0
+rtol: 0.0
+atol: 1e-6
+solver: 
+  _target_: diffrax.Tsit5
+adaptive_stepsize: True
+early_termination: True
+throw_on_error: False

@@ -1,0 +1,24 @@
+defaults:
+  - override job_logging: colorlog
+  - override hydra_logging: colorlog
+
+run:
+  dir: ${out_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+sweep:
+  dir: ${out_dir}/multirun/${hydra.job.name}
+  subdir: ${hydra.job.override_dirname}/seed=${seed}
+
+job:
+  chdir: True
+  config: 
+    override_dirname:
+      exclude_keys: 
+        - seed
+        - gpu_id
+        - nb_workers
+        - hydra
+        - out_dir
+        - plot
+        - OL_eval_on_train
+        - epochs

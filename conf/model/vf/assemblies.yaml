@@ -1,0 +1,36 @@
+defaults:
+  - activation/relu@actE
+  - activation/relu@actI
+  - controller: leaky-pi
+  - defaults
+  - _self_
+
+_target_: bcp.models.assemblies.vf.ExcInhAssemblyVectorField
+
+# RNG KEY FOR MEMBERSHIP
+RNG_Key: ${seed}
+
+# Architecture
+nb_hidden: 1
+sizes_hidden: [128]
+use_bias: True
+nb_exc_per_ensemble: 16
+EI_ratio: 4.0
+
+# Dynamics
+fb_to_readout: True
+tauI: 10e-3
+tauE: 30e-3
+tauOut: 30e-3
+
+# Initialization
+FF_init: 'default'
+
+# EI connectivity
+perc_overlap: 0.0
+binary_membership: False
+normalize_membership: True
+alpha: 0.5
+
+# Jacobian
+inh_deriv_in_jac: True

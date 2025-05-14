@@ -1,0 +1,43 @@
+_target_: bcp.onlinelearning.ExcInhAssemblyOnlineLearningVF
+data_dim: ${task.N}
+nb_ensembles: 40
+nb_exc: 160
+nb_inh: 40
+nb_outputs: 1
+actE:
+  _target_: bcp.core.activation.ReLU
+actI:
+  _target_: bcp.core.activation.ReLU
+tauE: 20e-3
+tauI: 10e-3
+tauOut: 20e-3
+tauSlow: 10.0
+tauPre: 100e-3
+eta_OUT: 0
+eta_FF: 10
+alpha: 0.5
+use_bias: False
+perc_overlap: ${perc_random_memb}
+binary_membership: False
+normalize_membership: True
+global_fb: False
+random_fb_per_ensemble: False
+random_fb_per_neuron: False
+only_disinhibitory_feedback: True
+controller:
+  _target_: bcp.core.LeakyPIController
+  dim_output: 1
+  loss: 
+    _target_: bcp.core.losses.SigmoidCrossEntropy
+    name: 'SigmoidCrossEntropy'
+    shift: 0.6
+    steepness: 4
+  k_p: 1
+  k_i: 0
+  leak: 1.0
+  tau: 200e-3
+clip_hidden_weights: False
+clip_val: 1.0
+weight_decay: 0.0
+
+

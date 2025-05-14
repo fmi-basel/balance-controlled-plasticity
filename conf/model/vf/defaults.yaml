@@ -1,0 +1,5 @@
+defaults:
+  - _self_
+
+dim_output: ${dataset.dim_output}
+flatten_input: True

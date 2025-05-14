@@ -1,0 +1,45 @@
+defaults:
+  - hydra: default
+  - model: onlinelearning-fearcond
+  - _self_
+
+out_dir : out/fearcond  # Directory to save model and log files.
+
+# RNG
+seed: False  # Random seed. If False, use random seed
+
+# Performance
+device : 'cpu'  # 'cpu' or 'gpu'
+gpu_id : 0      # GPU ID to use
+
+# General simulation parameters
+T: 10      # Time per pairing in seconds
+dt: 1e-3  # Time step in seconds
+
+# Important simulation parameters
+perc_random_memb: 0.0   # Percentage of random memberships
+train_iterations: 10  # Number of pairings to train on
+train_readout_only: False  # CONTROL: Train only the readout layer
+train_hidden_only: True  # Train only the hidden layer
+
+# Recording
+rec_dt: ${dt}
+rec_activity: False
+rec_weights: True
+
+# Experiment (Inputs & Targets)
+task:
+  _target_: bcp.data.experiments.KrabbeFearConditioning
+  N: 20     # Number of input neurons
+  T: ${T}  # Time per pairing in seconds
+  T_CS: 4   # Time of the conditioned stimulus in seconds
+  T_US: 2 # Time of the unconditioned stimulus in seconds
+  T_ITI: 4  # Time of the inter-trial interval in seconds
+  dt: ${dt}  # Time step in seconds
+  noise: True  # Noise on or off
+  noise_tau: 0.2  # Time constant of the noise
+  noise_sigma: 0.05  # Standard deviation of the noise
+  noise_mu: 1.0  # Mean of the noise
+  tau_rise: 40e-3  # Rise time constant for CS encoding
+  tau_decay: 200e-3  # Fall time constant for CS encoding
+  us_input_strength: 0.0  # Strength of the US input to hidden layer

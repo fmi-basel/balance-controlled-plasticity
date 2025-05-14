@@ -1,0 +1,45 @@
+defaults:
+  - hydra: default
+  - model: onlinelearning-traj
+  - _self_
+
+out_dir : out/traj  # Directory to save model and log files.
+
+# RNG
+seed: False  # Random seed. If False, use random seed
+
+# Performance
+device : 'cpu'  # 'cpu' or 'gpu'
+gpu_id : 0      # GPU ID to use
+
+# General simulation parameters
+T: 5      # Time per trajectory in seconds
+dt: 1e-3  # Time step in seconds
+max_period: 2   # maximum frequency of the sinusoidal inputs as proportion of T (must be int)
+
+# Important simulation parameters
+perc_random_memb: 0.0   # Percentage of random memberships
+train_iterations: 4320  # Number of iterations to train on
+train_readout_only: False  # CONTROL: Train only the readout layer
+
+# Recording
+rec_dt: ${dt}
+rec_every_Nth_iter: 20  # Record every Nth iteration
+rec_first_50_iters: False
+rec_activity: False
+rec_weights: True
+
+# Trajectory
+trajectory:
+  _target_: bcp.data.shapetrajectory.ShapeTrajectory
+  path: ${hydra:runtime.cwd}/data/shapes
+  shape: "turtle"  # "turtle" or "tree" at the moment
+  highDembedding: False
+
+# Inputs
+inputs:
+  _target_: bcp.data.onlineinputs.SinusoidalInputs
+  N: 20
+  amp_min: 1.0
+  amp_max: 1.0
+  linear_combination: True

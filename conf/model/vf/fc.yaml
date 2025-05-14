@@ -1,0 +1,16 @@
+defaults:
+  - activation: relu
+  - controller: leaky-pi
+  - defaults
+  - _self_
+
+_target_: bcp.models.fc.FullyConnectedVectorField
+
+# Architecture
+nb_hidden: 1
+sizes_hidden: [128]
+use_bias: True
+
+# Dynamics (not used for BP training)
+tau: 20e-3
+fb_to_readout: True

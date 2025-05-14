@@ -1,0 +1,3 @@
+_target_: optax.adamw
+learning_rate: 0.001
+weight_decay: 0.1

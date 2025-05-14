@@ -1,0 +1,4 @@
+_target_: optax.sgd
+learning_rate: 0.001
+momentum: 0.98
+nesterov: True

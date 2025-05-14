@@ -1,0 +1,39 @@
+_target_: bcp.onlinelearning.ExcInhAssemblyOnlineLearningVF
+data_dim: ${task.N}
+nb_ensembles: 80
+nb_exc: 320
+nb_inh: 80
+nb_outputs: 1
+actE:
+  _target_: bcp.core.activation.ReLU
+actI:
+  _target_: bcp.core.activation.ReLU
+tauE: 20e-3
+tauI: 10e-3
+tauOut: 50e-3
+tauPre: 50e-3
+tauSlow: 10.0
+eta_OUT: 0.01
+eta_FF: 0.02
+alpha: 0.5
+use_bias: True
+perc_overlap: ${perc_random_memb}
+binary_membership: False
+normalize_membership: True
+global_fb: False
+random_fb_per_ensemble: False
+random_fb_per_neuron: False
+only_disinhibitory_feedback: False
+controller:
+  _target_: bcp.core.LeakyPIController
+  dim_output: 1
+  loss: 
+    _target_: bcp.core.losses.MSE
+    name: 'MSE'
+  k_p: 10.0
+  k_i: 2.0
+  leak: 1.0
+  tau: 100e-3
+clip_hidden_weights: False
+clip_val: 1.0
+weight_decay: 0.0

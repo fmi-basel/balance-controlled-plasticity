@@ -1,0 +1,4 @@
+_target_: bcp.core.ProportionalController
+dim_output: ${dataset.dim_output}
+loss: ${dataset.loss}
+k_p: 100

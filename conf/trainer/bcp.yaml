@@ -1,0 +1,28 @@
+defaults: 
+  - defaults
+  - _self_
+
+_target_: bcp.models.assemblies.trainer.BalanceControlled
+
+# FB weight modifications
+average_fb_weights: False
+clip_fb_weights: False
+clip_val: 1.0
+norm_fb_weights: False
+norm_val: 1.0
+clip_params: False
+clip_val_params: 1.0
+
+# Gradient norm
+norm_grads: False
+clip_grads: False
+clip_val_grads: 0.1
+
+# FB strength
+strong_fb: True
+target_nudge: 0.015
+
+# Learning rule 
+activity_reg_strength: 0.0
+gate_by_derivative: False
+use_fr_error: False

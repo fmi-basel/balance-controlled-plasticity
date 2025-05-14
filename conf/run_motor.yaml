@@ -1,0 +1,45 @@
+defaults:
+  - hydra: default
+  - model: onlinelearning-motor
+  - _self_
+
+out_dir : out/motor  # Directory to save model and log files.
+
+# RNG
+seed: False  # Random seed. If False, use random seed
+
+# Performance
+device : 'cpu'  # 'cpu' or 'gpu'
+gpu_id : 0      # GPU ID to use
+
+# General simulation parameters
+T: 8      # Time per pairing in seconds
+dt: 1e-3  # Time step in seconds
+
+# Important simulation parameters
+perc_random_memb: 0.0   # Percentage of random memberships
+train_iterations: 2000  # Number of pairings to train on
+
+# Recording
+rec_dt: ${dt}
+rec_activity: True
+rec_weights: False
+rec_every_Nth_iter: 10  # Record every Nth iteration
+
+# Experiment (Inputs & Targets)
+task:
+  _target_: bcp.data.experiments.RenMotorLearning
+  N: 20     # Number of input neurons
+  N_sines: 10  # Number of sine waves
+  T: ${T}  # Time per pairing in seconds
+  t_cue: 2  # Time of cue in seconds
+  T_leverpress: 2.0  # Time of lever press in seconds
+  dt: ${dt}  # Time step in seconds
+  noise: True  # Noise on or off
+  noise_tau: 0.5  # Time constant of the noise
+  noise_sigma: 0.05  # Standard deviation of the noise
+  noise_mu: 0.0  # Mean of the noise
+  tau_rise: 30e-3  # Rise time constant for cue
+  tau_decay: 500e-3  # Fall time constant for cue
+  sine_minfreq: 0.1  # Minimum frequency of sine waves
+  sine_maxfreq: 2.0  # Maximum frequency of sine waves

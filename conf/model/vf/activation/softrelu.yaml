@@ -1,0 +1,5 @@
+_target_: bcp.core.activation.SoftReLu
+
+scale: 1.0
+sharpness: 1.0
+shift: 0.0

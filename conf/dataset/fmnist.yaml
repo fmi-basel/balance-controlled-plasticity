@@ -1,0 +1,20 @@
+# Fashion MNIST configuration
+defaults:
+  - loss: softmax-cross-entropy
+  - _self_
+
+_target_: bcp.data.FashionMNISTDataset
+
+name: FashionMNIST
+task: classification
+
+path: "${orig_cwd:}/data/fmnist"
+
+dim_input: 784        # 28x28 (flattened)
+dim_output: 10
+
+valid_split: 0.1
+OL_eval_subset_split: 0.1
+
+soft_targets: True
+soft_target_val: 0.99

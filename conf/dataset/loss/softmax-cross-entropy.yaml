@@ -1,0 +1,2 @@
+  _target_: bcp.core.losses.SoftmaxCrossEntropy
+  name: cross_entropy
