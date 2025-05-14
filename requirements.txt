@@ -101,3 +101,8 @@ tensorflow==2.16.1
 
 # Note that this will not install GPU support
 # for Jax. You can try and use the experimental JAX-metal backend.
+
+
+# Jupyter Notebook support
+jupyter
+ipykernel
