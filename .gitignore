@@ -128,6 +128,7 @@ dmypy.json
 
 #Output
 out/
+figures/
 
 # data
 data/mnist/
