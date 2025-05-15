@@ -3,10 +3,10 @@
 <img src="bcp-header.png">
 
 This repository contains all code and scripts used to generate the numerical results and figures in our preprint
-[**"Breaking Balance: Encoding local error signals in perturbations of excitation–inhibition balance"**](placeholder).
+[**"Breaking Balance: Encoding local error signals in perturbations of excitation–inhibition balance"**](https://doi.org/10.1101/2025.05.12.653626).
 
 ![Build Status](https://img.shields.io/badge/status-preprint-yellow)
-[![bioRxiv preprint](https://img.shields.io/badge/bioRxiv-link-blue)](placeholder)
+[![bioRxiv preprint](https://img.shields.io/badge/bioRxiv-link-blue)](https://doi.org/10.1101/2025.05.12.653626)
 
 ---
 
@@ -19,13 +19,12 @@ If you use any of this code or build upon this work, please cite:
   title={Breaking Balance: Encoding local error signals in perturbations of excitation–inhibition balance},
   author={Julian Rossbroich and Friedemann Zenke},
   year={2025},
-  eprint={XXXXXXX},
+  eprint={2025.05.12.653626},
   archivePrefix={bioRxiv},
   journal={bioRxiv},
-  doi={10.1101/XXXXXXX}
+  doi={10.1101/2025.05.12.653626}
 }
 ```
-
 ## Installation
 
 Follow these steps to reproduce our results in a clean Python 3.11.8 environment. This project relies on **JAX** and **Diffrax** for JIT-compiled ODE solving. 
