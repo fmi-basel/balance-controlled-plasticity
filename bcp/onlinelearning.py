@@ -9,13 +9,11 @@ from functools import partial
 
 from .models.assemblies.utils import (
     make_membership_matrices,
-    make_membership_matrices_sparse_hopfield,
     get_W_from_g_and_M,
     R2score,
     MSELoss,
     get_gIE_analytic,
     get_W_IE_optimized,
-    get_W_IE_multistart,
 )
 
 
