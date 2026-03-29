@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 
 import time
+from dataclasses import dataclass
 
 from jax import vmap
 from jax import random
@@ -14,7 +15,114 @@ from .models.assemblies.utils import (
     MSELoss,
     get_gIE_analytic,
     get_W_IE_optimized,
+    get_max_gEE,
 )
+
+
+@dataclass(frozen=True)
+class OnlineLearningMode:
+    closedloop: bool = False
+    update_wFF: bool = False
+    update_wOUT: bool = False
+    update_wEE: bool = False
+
+    @classmethod
+    def open_loop_eval(cls):
+        return cls(closedloop=False)
+
+    @classmethod
+    def closed_loop_eval(cls):
+        return cls(closedloop=True)
+
+    @classmethod
+    def train_full(cls, update_wEE=False):
+        return cls(
+            closedloop=True, update_wFF=True, update_wOUT=True, update_wEE=update_wEE
+        )
+
+    @classmethod
+    def train_readout(cls):
+        return cls(
+            closedloop=False, update_wFF=False, update_wOUT=True, update_wEE=False
+        )
+
+
+# ---------------------------------------------------------------------------
+# Feedback projectors
+# ---------------------------------------------------------------------------
+
+
+class _GlobalFeedbackProjector:
+    """Sums all controller dimensions into a single scalar broadcast to all inh. neurons."""
+
+    def __init__(self, feedback_to_excitatory=False):
+        self.feedback_to_excitatory = feedback_to_excitatory
+
+    def __call__(self, ctrl, W_OUT):
+        fb_inh = ctrl.sum()
+        fb_exc = ctrl.sum() if self.feedback_to_excitatory else 0.0
+        return fb_inh, fb_exc
+
+
+class _RandomFeedbackProjector:
+    """Fixed random feedback matrix, pre-projected onto the inhibitory population."""
+
+    def __init__(
+        self,
+        W_FB_inh,
+        W_FB_exc=None,
+        nb_exc=0,
+        only_disinhibitory=False,
+    ):
+        # W_FB_inh: (nb_outputs, nb_inh)
+        self.W_FB_inh = W_FB_inh
+        self.W_FB_exc = W_FB_exc
+        self.nb_exc = nb_exc
+        self.only_disinhibitory = only_disinhibitory
+
+    def __call__(self, ctrl, W_OUT):
+        fb_inh = jnp.dot(ctrl, self.W_FB_inh)
+        if self.only_disinhibitory:
+            fb_inh = jax.nn.relu(fb_inh)
+
+        if self.W_FB_exc is not None:
+            fb_exc = jnp.dot(ctrl, self.W_FB_exc)
+        else:
+            fb_exc = jnp.zeros(self.nb_exc)
+
+        return fb_inh, fb_exc
+
+
+class _StructuredFeedbackProjector:
+    """Uses the learned readout W_OUT to project controller feedback (default)."""
+
+    def __init__(
+        self, M_I, M_E, only_disinhibitory=False, feedback_to_excitatory=False
+    ):
+        self.M_I = M_I
+        self.M_E = M_E
+        self.only_disinhibitory = only_disinhibitory
+        self.feedback_to_excitatory = feedback_to_excitatory
+        self.nb_exc = M_E.shape[0]
+
+    def __call__(self, ctrl, W_OUT):
+        W_FB_I = jnp.dot(W_OUT.T, self.M_I.T)
+        fb_inh = jnp.dot(ctrl, W_FB_I)
+        if self.only_disinhibitory:
+            fb_inh = jax.nn.relu(fb_inh)
+
+        if self.feedback_to_excitatory:
+            W_FB_E = jnp.dot(W_OUT.T, self.M_E.T)
+            fb_exc = jnp.dot(ctrl, W_FB_E)
+        else:
+            fb_exc = jnp.zeros(self.nb_exc)
+
+        return fb_inh, fb_exc
+
+
+# ---------------------------------------------------------------------------
+# Main vector-field class
+# ---------------------------------------------------------------------------
 
 
 class ExcInhAssemblyOnlineLearningVF:
@@ -30,27 +138,30 @@ class ExcInhAssemblyOnlineLearningVF:
         tauE,
         tauI,
         tauOut,
-        tauSlow,
         tauPre,
         eta_OUT,
         eta_FF,
-        alpha: float,
+        eta_EE,
+        alpha,
         g_EI="default",  # 'auto' means set to 1 / nb_exc_per_ens or float
         g_EE=0.0,
         g_II=0.0,
         g_XI=1.0,
         use_bias=True,
         rng_key=None,
-        overlap: float = 0.0,
+        overlap=0.0,
         controller=None,
         global_fb=False,
         random_fb_per_ensemble=False,
         random_fb_per_neuron=False,
         only_disinhibitory_feedback=False,
+        feedback_to_excitatory=False,
         clip_weights=False,
         clip_val=1.0,
         weight_decay=0.000,
-        w_ie_log_every: int = 1000,
+        gEE_min=0.0,
+        gEE_max="default",  # set by get_max_gEE if 'default'
+        w_ie_log_every=1000,
     ):
         if rng_key is None:
             seed = int(1000 * time.time())
@@ -75,7 +186,6 @@ class ExcInhAssemblyOnlineLearningVF:
         self.tauE = tauE
         self.tauI = tauI
         self.tauOut = tauOut
-        self.tauSlow = tauSlow  # Not used anymore
         self.tauPre = tauPre
 
         # weight scale parameters
@@ -90,17 +200,28 @@ class ExcInhAssemblyOnlineLearningVF:
         self.random_fb_per_ensemble = random_fb_per_ensemble
         self.random_fb_per_neuron = random_fb_per_neuron
         self.only_disinhibitory_feedback = only_disinhibitory_feedback
+        self.feedback_to_excitatory = feedback_to_excitatory
 
         # Learning
         self.use_bias = use_bias
         self.alpha = alpha
-        self.beta = -alpha / (alpha - 1)
         self.eta_FF = eta_FF
         self.eta_OUT = eta_OUT
+        self.eta_EE = eta_EE
         self.clip_weights = clip_weights
         self.clip_val = clip_val
         self.weight_decay = weight_decay
+        self.gEE_min = gEE_min
+        self.gEE_max = (
+            get_max_gEE(self.g_II, self.g_EI, self.g_EE, self.tauE, self.tauI) * 0.95
+            if gEE_max == "default"
+            else gEE_max
+        )
         self.w_ie_log_every = w_ie_log_every
+
+        # Override tau_bar with min(tauE, tauI) to match the fastest network
+        # mode under slow inputs.
+        self.tau_bar = min(self.tauE, self.tauI)
 
         # Generate ensemble membership matrices
         self.M_E, self.M_I = make_membership_matrices(
@@ -111,75 +232,315 @@ class ExcInhAssemblyOnlineLearningVF:
             overlap=overlap,
         )
 
-        # Override tau_bar with min(tauE, tauI) to match the fastest network mode under slow inputs.
-        self.tau_bar = min(self.tauE, self.tauI)
-
-        # Make recurrent weight matrices
-        # # # # # # # # # # # # # # # # #
-
+        # Fixed recurrent weight matrices
         self.W_EI = get_W_from_g_and_M(self.g_EI, self.M_E, self.M_I)
         self.W_EE = get_W_from_g_and_M(self.g_EE, self.M_E, self.M_E)
         self.W_II = get_W_from_g_and_M(self.g_II, self.M_I, self.M_I)
 
-        if self.overlap == 0.0:
-            self.g_IE = get_gIE_analytic(
-                self.alpha, self.g_II, self.g_EI, self.g_EE, self.g_XI
-            )
-            self.W_IE = get_W_from_g_and_M(self.g_IE, self.M_I, self.M_E)
+        # I-to-E weights (analytic or optimized depending on overlap)
+        self.W_IE = self._init_W_IE(alpha, overlap, w_ie_log_every)
 
-        else:
-            g_IE = get_gIE_analytic(
-                self.alpha, self.g_II, self.g_EI, self.g_EE, self.g_XI
-            )
-            W_IE_analytic = get_W_from_g_and_M(g_IE, self.M_I, self.M_E)
-
-            self.g_IE = None
-            self.W_IE, _ = get_W_IE_optimized(
-                self.W_EI.T,
-                self.M_E,
-                self.M_I,
-                self.g_XI,
-                alpha,
-                progress_every=self.w_ie_log_every,
-                initial_W_IE=W_IE_analytic.T,
-            )
-
-        # Random feedback weights
-        assert not (self.global_fb and self.random_fb_per_ensemble), (
-            "Cannot have global and random feedback"
-        )
-        assert not (self.global_fb and self.random_fb_per_neuron), (
-            "Cannot have global and random feedback"
-        )
-        assert not (self.random_fb_per_ensemble and self.random_fb_per_neuron), (
-            "Cannot have per-ensemble and per-neuron random feedback"
-        )
-
+        # Random feedback weights (stored here for accessibility)
         key_FB, rng_key = random.split(rng_key)
-
-        if self.random_fb_per_neuron:
+        if random_fb_per_neuron:
             self.wFB = random.normal(
                 key_FB, shape=(nb_outputs, nb_inh), dtype=jnp.float32
             )
-
-        elif self.random_fb_per_ensemble:
-            # Here, we generate a random W_OUT (nb_ensembles, nb_outputs)
-            # and project it onto the excitatory population according to the low-rank
-            # structure of the network
+        elif random_fb_per_ensemble:
             self.wFB = random.normal(
                 key_FB, shape=(nb_outputs, nb_ensembles), dtype=jnp.float32
             )
         else:
             self.wFB = None
 
+        # Build feedback projector
+        self.fb_projector = self._build_fb_projector(
+            global_fb,
+            random_fb_per_ensemble,
+            random_fb_per_neuron,
+            only_disinhibitory_feedback,
+            feedback_to_excitatory,
+        )
+
+    # -----------------------------------------------------------------------
+    # Initialisation helpers
+    # -----------------------------------------------------------------------
+
+    def _init_W_IE(self, alpha, overlap, w_ie_log_every):
+        """Compute I-to-E weight matrix, analytically or via optimisation."""
+        g_IE_analytic = get_gIE_analytic(
+            alpha, self.g_II, self.g_EI, self.g_EE, self.g_XI
+        )
+        W_IE_analytic = get_W_from_g_and_M(g_IE_analytic, self.M_I, self.M_E)
+
+        if overlap == 0.0:
+            self.g_IE = g_IE_analytic
+            return W_IE_analytic
+        else:
+            self.g_IE = None
+            W_IE, _ = get_W_IE_optimized(
+                self.W_EI.T,
+                self.M_E,
+                self.M_I,
+                self.g_XI,
+                alpha,
+                progress_every=w_ie_log_every,
+                initial_W_IE=W_IE_analytic.T,
+            )
+            return W_IE
+
+    def _build_fb_projector(
+        self,
+        global_fb,
+        random_fb_per_ensemble,
+        random_fb_per_neuron,
+        only_disinhibitory,
+        feedback_to_excitatory,
+    ):
+        """Instantiate the feedback projector matching the configured mode."""
+        assert not (global_fb and random_fb_per_ensemble), (
+            "Cannot have global and random feedback"
+        )
+        assert not (global_fb and random_fb_per_neuron), (
+            "Cannot have global and random feedback"
+        )
+        assert not (random_fb_per_ensemble and random_fb_per_neuron), (
+            "Cannot have per-ensemble and per-neuron random feedback"
+        )
+
+        if global_fb:
+            return _GlobalFeedbackProjector(
+                feedback_to_excitatory=feedback_to_excitatory,
+            )
+        elif random_fb_per_neuron:
+            if feedback_to_excitatory:
+                raise ValueError(
+                    "random_fb_per_neuron does not support feedback_to_excitatory=True"
+                )
+
+            # wFB already has shape (nb_outputs, nb_inh)
+            return _RandomFeedbackProjector(
+                self.wFB,
+                only_disinhibitory=only_disinhibitory,
+                nb_exc=self.nb_exc,
+            )
+        elif random_fb_per_ensemble:
+            W_FB_inh = jnp.dot(self.wFB, self.M_I.T)
+            W_FB_exc = jnp.dot(self.wFB, self.M_E.T) if feedback_to_excitatory else None
+            return _RandomFeedbackProjector(
+                W_FB_inh,
+                W_FB_exc=W_FB_exc,
+                only_disinhibitory=only_disinhibitory,
+                nb_exc=self.nb_exc,
+            )
+        else:
+            return _StructuredFeedbackProjector(
+                self.M_I,
+                self.M_E,
+                only_disinhibitory=only_disinhibitory,
+                feedback_to_excitatory=feedback_to_excitatory,
+            )
+
+    # -----------------------------------------------------------------------
+    # Properties
+    # -----------------------------------------------------------------------
+
     @property
     def membership_matrices(self):
         return self.M_E, self.M_I
 
+    # -----------------------------------------------------------------------
+    # Weight helpers
+    # -----------------------------------------------------------------------
+
     def _clip_weights(self, *weights):
         if not self.clip_weights:
             return weights
-        return tuple(weight.clip(-self.clip_val, self.clip_val) for weight in weights)
+        return tuple(w.clip(-self.clip_val, self.clip_val) for w in weights)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _get_weights(self, W_FF, W_OUT, B, g_EE_A):
+        """Project low-rank parameters onto the full neuron space.
+
+        Recurrent weights W_EI/W_IE/W_II are fixed class attributes.
+        W_EE is either fixed (eta_EE == 0) or built from the stateful assembly
+        vector state["g_EE_A"] when eta_EE != 0.
+        """
+        W_XE = jnp.dot(W_FF, self.M_E.T)  # [data_dim, nb_exc]
+        W_XI = jnp.dot(W_FF, self.M_I.T)  # [data_dim, nb_inh]
+        B_E = jnp.dot(B, self.M_E.T)
+        B_I = jnp.dot(B, self.M_I.T)
+        W_EO = jnp.dot(self.M_E, W_OUT)  # [nb_exc, nb_outputs]
+
+        if self.eta_EE == 0.0:
+            W_EE = self.W_EE
+        else:
+            W_EE = self._build_W_EE_from_g_EE_A(g_EE_A)
+
+        return W_XE, W_XI, self.W_EI, self.W_IE, W_EE, self.W_II, W_EO, B_E, B_I
+
+    def convert_params_to_weights(self, W_FF, W_OUT, B, g_EE_A=None):
+        """Backward-compatible alias for _get_weights.
+
+        g_EE_A is only required when eta_EE != 0. When omitted (eta_EE == 0
+        case), the fixed self.W_EE class attribute is used instead.
+        """
+        if g_EE_A is None:
+            g_EE_A = jnp.ones(self.nb_ensembles) * self.g_EE
+        return self._get_weights(W_FF, W_OUT, B, g_EE_A)
+
+    def _project_g_EE_A(self, g_EE_A):
+        return g_EE_A.clip(self.gEE_min, self.gEE_max)
+
+    def _bound_g_EE_A_update(self, g_EE_A, dg_EE_A):
+        # state["g_EE_A"] can drift slightly outside [gEE_min, gEE_max] between
+        # ODE steps. We re-clamp here so the bound check compares
+        # against the effective value, not the drifted one.
+        g_EE_A = self._project_g_EE_A(g_EE_A)
+        dg_EE_A = jnp.nan_to_num(dg_EE_A, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Hard bound: at lower/upper bound, block updates that push outward.
+        dg_EE_A = jnp.where((g_EE_A <= self.gEE_min) & (dg_EE_A < 0.0), 0.0, dg_EE_A)
+        dg_EE_A = jnp.where((g_EE_A >= self.gEE_max) & (dg_EE_A > 0.0), 0.0, dg_EE_A)
+
+        return dg_EE_A
+
+    def _build_W_EE_from_g_EE_A(self, g_EE_A):
+        g_EE_A = self._project_g_EE_A(g_EE_A)
+        return jnp.dot(self.M_E * g_EE_A[None, :], self.M_E.T)
+
+    # -----------------------------------------------------------------------
+    # Core computation — dynamics and learning
+    # -----------------------------------------------------------------------
+
+    def _compute_currents(
+        self,
+        state,
+        x,
+        W_XE,
+        W_XI,
+        W_EI,
+        W_IE,
+        W_EE,
+        W_II,
+        W_EO,
+    ):
+        """Compute all synaptic currents from state and weight matrices."""
+        rE = self.actE(state["uE"])
+        rI = self.actI(state["uI"])
+        return {
+            "rE": rE,
+            "rI": rI,
+            "I_XE": jnp.dot(x, W_XE),
+            "I_XI": jnp.dot(x, W_XI),
+            "I_IE": jnp.dot(rI, W_IE),
+            "I_EI": jnp.dot(rE, W_EI),
+            # These are exactly zero when g_EE / g_II = 0
+            "I_EE": jnp.dot(rE, W_EE),
+            "I_II": jnp.dot(rI, W_II),
+            "I_EO": jnp.dot(rE, W_EO),
+        }
+
+    def _dynamics(self, state, x, currents, B_E, B_I, fb, fb_exc):
+        """ODE right-hand side for all dynamic state variables."""
+        uE, uI, uOut = state["uE"], state["uI"], state["uOut"]
+        rE = currents["rE"]
+
+        # Total feedforward drive to the excitatory population
+        I_ff = currents["I_XE"] + B_E
+
+        duE = (
+            1 / self.tauE * (-uE + I_ff - currents["I_IE"] + currents["I_EE"] + fb_exc)
+        )
+        duI = (
+            1
+            / self.tauI
+            * (-uI + currents["I_XI"] + B_I + currents["I_EI"] + currents["I_II"] - fb)
+        )
+        duOut = 1 / self.tauOut * (-uOut + currents["I_EO"])
+
+        return {
+            "uE": duE,
+            "uI": duI,
+            "uOut": duOut,
+            "eligX": 1 / self.tauPre * (-state["eligX"] + x),
+            "eligR": 1 / self.tauPre * (-state["eligR"] + rE),
+            "I_FF_bar": 1 / self.tau_bar * (-state["I_FF_bar"] + I_ff),
+        }
+
+    def _learning(
+        self,
+        state,
+        currents,
+        out_error,
+        W_FF,
+        W_OUT,
+        B,
+        W_XE,
+        B_E,
+        update_wFF,
+        update_wOUT,
+        update_wEE,
+    ):
+        """Compute weight update deltas.
+
+        Weight decay for W_FF and B is applied in the expanded (neuron-space)
+        representation — W_XE and B_E — to match the original formulation.
+        """
+        error_hidden = self.alpha * jax.nn.relu(state["I_FF_bar"]) - currents["I_IE"]
+
+        if update_wFF:
+            scale = self.eta_FF / self.nb_exc_per_ens
+            dWXE = jnp.outer(state["eligX"], error_hidden) - self.weight_decay * W_XE
+            dWFF = scale * jnp.dot(dWXE, self.M_E)
+
+            if self.use_bias:
+                dB = scale * jnp.dot(error_hidden - self.weight_decay * B_E, self.M_E)
+            else:
+                dB = jnp.zeros_like(B)
+        else:
+            dWFF = jnp.zeros_like(W_FF)
+            dB = jnp.zeros_like(B)
+
+        if update_wOUT:
+            scale = self.eta_OUT / self.nb_exc_per_ens
+            dWOUT = scale * jnp.dot(self.M_E.T, jnp.outer(state["eligR"], out_error))
+        else:
+            dWOUT = jnp.zeros_like(W_OUT)
+
+        if update_wEE and self.eta_EE != 0.0:
+            eligR_A = jnp.dot(state["eligR"], self.M_E).squeeze(0)
+            err_A = jnp.dot(error_hidden, self.M_E).squeeze(0)
+            g_EE_A = state["g_EE_A"]
+
+            dg_EE_A = self.eta_EE * (eligR_A * err_A - self.weight_decay * g_EE_A)
+
+            dg_EE_A = self._bound_g_EE_A_update(g_EE_A, dg_EE_A)
+        else:
+            dg_EE_A = jnp.zeros_like(state["g_EE_A"])
+
+        return {"W_FF": dWFF, "B": dB, "W_OUT": dWOUT, "g_EE_A": dg_EE_A}
+
+    # -----------------------------------------------------------------------
+    # Controller / feedback
+    # -----------------------------------------------------------------------
+
+    def get_ctrl_and_fb(self, state, y_pred, y, closedloop, W_OUT=None):
+        if closedloop:
+            ctrl, delta_state_ctrl = self.controller(y_pred, y, state["ctrl"])
+            W_OUT_for_fb = state["W_OUT"] if W_OUT is None else W_OUT
+            fb, fb_exc = self.fb_projector(ctrl, W_OUT_for_fb)
+        else:
+            ctrl = jnp.zeros(self.nb_outputs)
+            delta_state_ctrl = self.controller.get_initial_state_onlineVF()
+            fb = jnp.zeros(self.nb_inh)
+            fb_exc = jnp.zeros(self.nb_exc)
+
+        return ctrl, fb, fb_exc, delta_state_ctrl
+
+    # -----------------------------------------------------------------------
+    # Public class interface
+    # -----------------------------------------------------------------------
 
     def __call__(
         self,
@@ -187,11 +548,19 @@ class ExcInhAssemblyOnlineLearningVF:
         t,
         data,
         target=None,
+        mode=None,
         closedloop=False,
         update_wFF=False,
         update_wOUT=False,
+        update_wEE=False,
     ):
-        # Evaluate data
+        if mode is not None:
+            closedloop = mode.closedloop
+            update_wFF = mode.update_wFF
+            update_wOUT = mode.update_wOUT
+            update_wEE = mode.update_wEE
+
+        # Evaluate input
         x = data.evaluate(t)
 
         # Evaluate target and compute output error
@@ -204,180 +573,82 @@ class ExcInhAssemblyOnlineLearningVF:
             y_pred = jnp.zeros(self.nb_outputs)
             out_error = jnp.zeros(self.nb_outputs)
 
-        # Unpack state
-        uE = state["uE"]
-        uI = state["uI"]
-        uOut = state["uOut"]
-
-        # firing rates
-        rE = self.actE(uE)
-        rI = self.actI(uI)
-
-        # Unpack parameters
-        W_FF = state["W_FF"]
-        W_OUT = state["W_OUT"]
-        B = state["B"]
-
+        # Unpack and clip learnable parameters
+        W_FF, W_OUT, B, g_EE_A = (
+            state["W_FF"],
+            state["W_OUT"],
+            state["B"],
+            state["g_EE_A"],
+        )
         W_FF, B = self._clip_weights(W_FF, B)
 
-        # Get weights
-        W_XE, W_XI, W_EI, W_IE, W_EO, B_E, B_I = self.convert_params_to_weights(
-            W_FF, W_OUT, B
+        # Project to full neuron space
+        W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO, B_E, B_I = self._get_weights(
+            W_FF, W_OUT, B, g_EE_A
         )
 
-        # New state
-        delta_state = {}
-
-        # Controller
-        ctrl, fb, delta_state["ctrl"] = self.get_ctrl_and_fb(
-            state, W_IE, W_EO, y_pred, y, closedloop, W_OUT=W_OUT
+        # Controller and feedback signal
+        ctrl, fb, fb_exc, delta_ctrl = self.get_ctrl_and_fb(
+            state, y_pred, y, closedloop, W_OUT=W_OUT
         )
 
-        # Excitatory population
-        I_XE = jnp.dot(x, W_XE)
-        I_IE = jnp.dot(rI, W_IE)
-        delta_state["uE"] = 1 / self.tauE * (-uE + I_XE + B_E - I_IE)
-
-        # Inhibitory population
-        I_XI = jnp.dot(x, W_XI)
-        delta_state["uI"] = 1 / self.tauI * (-uI + I_XI + jnp.dot(rE, W_EI) + B_I - fb)
-
-        # Output population
-        delta_state["uOut"] = 1 / self.tauOut * (-uOut + jnp.dot(rE, W_EO))
-
-        # presynaptic eligibility traces
-        delta_state["eligX"] = 1 / self.tauPre * (-state["eligX"] + x)
-        delta_state["eligX2"] = (
-            1 / self.tauOut * (-state["eligX2"] + state["eligX"])
-        )  # Not used in learning rule
-        delta_state["eligR"] = 1 / self.tauPre * (-state["eligR"] + rE)
-
-        # Postsynaptic traces for learning
-        delta_state["I_FF_bar"] = 1 / self.tau_bar * (-state["I_FF_bar"] + I_XE + B_E)
-
-        error_hidden = self.alpha * jax.nn.relu(state["I_FF_bar"]) - I_IE
-
-        # Update params
-        if update_wFF:
-            scaling_factor = self.eta_FF / (self.nb_exc_per_ens)
-
-            dWXE = jnp.outer(state["eligX"], error_hidden) - self.weight_decay * W_XE
-            delta_state["W_FF"] = scaling_factor * (jnp.dot(dWXE, self.M_E))
-
-            if self.use_bias:
-                # Bias
-                dB = error_hidden - self.weight_decay * B_E
-                delta_state["B"] = scaling_factor * jnp.dot(dB, self.M_E)
-            else:
-                delta_state["B"] = jnp.zeros_like(B)
-
-        else:
-            delta_state["W_FF"] = jnp.zeros_like(W_FF)
-            delta_state["B"] = jnp.zeros_like(B)
-
-        if update_wOUT:
-            scaling_factor = self.eta_OUT / (self.nb_exc_per_ens)
-            dWEO = jnp.outer(state["eligR"], out_error)
-            delta_state["W_OUT"] = scaling_factor * jnp.dot(self.M_E.T, dWEO)
-
-        else:
-            delta_state["W_OUT"] = jnp.zeros_like(W_OUT)
+        # Currents, dynamics, learning
+        currents = self._compute_currents(
+            state, x, W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO
+        )
+        delta_state = self._dynamics(state, x, currents, B_E, B_I, fb, fb_exc)
+        delta_state.update(
+            self._learning(
+                state,
+                currents,
+                out_error,
+                W_FF,
+                W_OUT,
+                B,
+                W_XE,
+                B_E,
+                update_wFF,
+                update_wOUT,
+                update_wEE,
+            )
+        )
+        delta_state["ctrl"] = delta_ctrl
 
         return delta_state
 
     def call_fixed_control(self, state, t, data, fb):
-        """
-        Call to the model with a fixed feedback signal
-        """
-        # Evaluate data and feedback
+        """Call to the model with a fixed (externally provided) feedback signal."""
         x = data.evaluate(t)
-        fb = fb.evaluate(t)
+        fb_val = fb.evaluate(t)
 
-        # Unpack state
-        uE = state["uE"]
-        uI = state["uI"]
-        uOut = state["uOut"]
-
-        # firing rates
-        rE = self.actE(uE)
-        rI = self.actI(uI)
-
-        # Unpack parameters
-        W_FF = state["W_FF"]
-        W_OUT = state["W_OUT"]
-        B = state["B"]
-
+        W_FF, W_OUT, B = state["W_FF"], state["W_OUT"], state["B"]
         W_FF, B = self._clip_weights(W_FF, B)
 
-        # Get weights
-        W_XE, W_XI, W_EI, W_IE, W_EO, B_E, B_I = self.convert_params_to_weights(
-            W_FF, W_OUT, B
+        W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO, B_E, B_I = self._get_weights(
+            W_FF, W_OUT, B, state["g_EE_A"]
         )
 
-        # New state
-        delta_state = {}
+        currents = self._compute_currents(
+            state, x, W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO
+        )
+        delta_state = self._dynamics(
+            state,
+            x,
+            currents,
+            B_E,
+            B_I,
+            fb_val,
+            jnp.zeros(self.nb_exc),
+        )
 
-        # No update to the controller because it remains unused here
+        # No controller update, no weight updates
         delta_state["ctrl"] = self.controller.get_initial_state_onlineVF()
-
-        # Excitatory population
-        I_XE = jnp.dot(x, W_XE)
-        I_IE = jnp.dot(rI, W_IE)
-        delta_state["uE"] = 1 / self.tauE * (-uE + I_XE + B_E - I_IE)
-
-        # Inhibitory population
-        I_XI = jnp.dot(x, W_XI)
-        delta_state["uI"] = 1 / self.tauI * (-uI + I_XI + jnp.dot(rE, W_EI) + B_I - fb)
-
-        # Output population
-        delta_state["uOut"] = 1 / self.tauOut * (-uOut + jnp.dot(rE, W_EO))
-
-        # presynaptic eligibility traces
-        delta_state["eligX"] = 1 / self.tauPre * (-state["eligX"] + x)
-        delta_state["eligX2"] = (
-            1 / self.tauOut * (-state["eligX2"] + state["eligX"])
-        )  # Not used in learning rule
-        delta_state["eligR"] = 1 / self.tauPre * (-state["eligR"] + rE)
-
-        # Postsynaptic traces for learning
-        delta_state["I_FF_bar"] = 1 / self.tau_bar * (-state["I_FF_bar"] + I_XE + B_E)
-
-        # NO UPDATE TO PARAMS (THIS IS JUST FOR ILLUSTRATION)
         delta_state["W_FF"] = jnp.zeros_like(W_FF)
         delta_state["B"] = jnp.zeros_like(B)
         delta_state["W_OUT"] = jnp.zeros_like(W_OUT)
+        delta_state["g_EE_A"] = jnp.zeros_like(state["g_EE_A"])
 
         return delta_state
-
-    def get_ctrl_and_fb(self, state, wIE, wEO, y_pred, y, closedloop, W_OUT=None):
-        # Controller
-        if closedloop:
-            ctrl, delta_state_ctrl = self.controller(y_pred, y, state["ctrl"])
-
-            if self.global_fb:
-                fb = ctrl.sum()
-            else:
-                if self.random_fb_per_ensemble:
-                    W_FB = jnp.dot(self.wFB, self.M_I.T)
-
-                if self.random_fb_per_neuron:
-                    W_FB = self.wFB
-
-                else:
-                    W_OUT_for_fb = state["W_OUT"] if W_OUT is None else W_OUT
-                    W_FB = jnp.dot(W_OUT_for_fb.T, self.M_I.T)
-
-                fb = jnp.dot(ctrl, W_FB)
-
-                if self.only_disinhibitory_feedback:
-                    fb = jax.nn.relu(fb)
-
-        else:
-            ctrl = jnp.zeros(self.nb_outputs)
-            delta_state_ctrl = self.controller.get_initial_state_onlineVF()
-            fb = jnp.zeros(self.nb_inh)
-
-        return ctrl, fb, delta_state_ctrl
 
     def out(self, state):
         return state["uOut"]
@@ -388,10 +659,8 @@ class ExcInhAssemblyOnlineLearningVF:
         if rng_key is None:
             rng_key = self.rng_key
 
-        # Weights
         key1, key2 = random.split(rng_key)
 
-        # Scaling factors
         w_FF_scale = 2 / self.data_dim
         w_OUT_scale = 2 / self.nb_ensembles
 
@@ -404,43 +673,25 @@ class ExcInhAssemblyOnlineLearningVF:
         )
         state["B"] = jnp.zeros(shape=(1, self.nb_ensembles))
 
-        # dynamics
+        # Assembly-space E-E gain state (diagonal of old W_EE_A representation).
+        state["g_EE_A"] = jnp.ones(shape=(self.nb_ensembles,)) * self.g_EE
+
+        # Dynamics
         state["uE"] = jnp.zeros(shape=(1, self.nb_exc))
         state["uI"] = jnp.zeros(shape=(1, self.nb_inh))
         state["uOut"] = jnp.zeros(shape=(1, self.nb_outputs))
 
-        # learning traces postsynaptic
+        # Postsynaptic eligibility trace
         state["I_FF_bar"] = jnp.zeros(shape=(1, self.nb_exc))
 
-        # learning traces presynaptic
+        # Presynaptic eligibility traces
         state["eligX"] = jnp.zeros(shape=(1, self.data_dim))
-        state["eligX2"] = jnp.zeros(shape=(1, self.data_dim))
         state["eligR"] = jnp.zeros(shape=(1, self.nb_exc))
 
-        # controller
+        # Controller
         state["ctrl"] = self.controller.get_initial_state_onlineVF()
 
         return state
-
-    @partial(jax.jit, static_argnums=(0,))
-    def convert_params_to_weights(self, W_FF, W_OUT, B):
-
-        # Forward
-        W_XE = jnp.dot(W_FF, self.M_E.T)  # [data_dim, nb_exc]
-        W_XI = jnp.dot(W_FF, self.M_I.T)  # [data_dim, nb_inh]
-
-        # Bias
-        B_E = jnp.dot(B, self.M_E.T)
-        B_I = jnp.dot(B, self.M_I.T)
-
-        # Recurrent connections
-        W_EI = self.W_EI
-        W_IE = self.W_IE
-
-        # Output
-        W_EO = jnp.dot(self.M_E, W_OUT)  # [nb_exc, nb_outputs]
-
-        return W_XE, W_XI, W_EI, W_IE, W_EO, B_E, B_I
 
     def analyze_run(self, inputs, sol, dt, rec_dt, targets=None, closedloop=False):
         out_dict = sol.ys.copy()
@@ -450,7 +701,7 @@ class ExcInhAssemblyOnlineLearningVF:
         out_dict["rI"] = self.actI(out_dict["uI"])
         out_dict = {key: val.squeeze() for key, val in out_dict.items()}
 
-        # Align inputs and targets with recording times
+        # Align inputs / targets with recording times
         if rec_dt != dt:
             assert rec_dt > dt, "rec_dt must be larger than dt"
             diff = int(rec_dt / dt)
@@ -458,52 +709,38 @@ class ExcInhAssemblyOnlineLearningVF:
             if targets is not None:
                 targets = targets[::diff]
 
-        # Calculate output error
         if targets is not None:
             y = targets
             y_pred = self.out(out_dict)
-            # out_dict["output_error"] = targets - y_pred
         else:
             y = jnp.zeros((inputs.shape[0], self.nb_outputs))
             y_pred = jnp.zeros((inputs.shape[0], self.nb_outputs))
-            # out_dict["output_error"] = jnp.zeros((inputs.shape[0], self.nb_outputs))
 
         def get_ctrl_fb_currents(x, y, y_pred, state):
-            W_FF = state["W_FF"]
-            W_OUT = state["W_OUT"]
-            B = state["B"]
-
+            W_FF, W_OUT, B = state["W_FF"], state["W_OUT"], state["B"]
             W_FF, B = self._clip_weights(W_FF, B)
 
-            W_XE, W_XI, W_EI, W_IE, W_EO, B_E, B_I = self.convert_params_to_weights(
-                W_FF, W_OUT, B
+            W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO, B_E, B_I = self._get_weights(
+                W_FF, W_OUT, B, state["g_EE_A"]
+            )
+            ctrl, fb, _, _ = self.get_ctrl_and_fb(
+                state, y_pred, y, closedloop, W_OUT=W_OUT
+            )
+            currents = self._compute_currents(
+                state, x, W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO
             )
 
-            # get control
-            ctrl, fb, _ = self.get_ctrl_and_fb(
-                state, W_IE, W_EO, y_pred, y, closedloop, W_OUT=W_OUT
+            # I_XE reported in the output dict includes the bias
+            I_ff = currents["I_XE"] + B_E
+            error_hidden = (
+                self.alpha * jax.nn.relu(state["I_FF_bar"]) - currents["I_IE"]
             )
-
-            # unpack state
-            uE = state["uE"]
-            uI = state["uI"]
-
-            # firing rates
-            rE = self.actE(uE)
-            rI = self.actI(uI)
-
-            # Input currents
-            I_XE = jnp.dot(x, W_XE) + B_E
-            I_IE = jnp.dot(rI, W_IE)
-
-            # Error at hidden layer
-            error_hidden = self.alpha * jax.nn.relu(state["I_FF_bar"]) - I_IE
 
             return (
                 ctrl.squeeze(),
                 fb.squeeze(),
-                I_XE.squeeze(),
-                I_IE.squeeze(),
+                I_ff.squeeze(),
+                currents["I_IE"].squeeze(),
                 error_hidden.squeeze(),
             )
 
@@ -522,8 +759,9 @@ class ExcInhAssemblyOnlineLearningVF:
         return out_dict
 
 
+# ---------------------------------------------------------------------------
 # CONTROL VF: No hidden layer
-# # # # # # # # # # # # # # # # #
+# ---------------------------------------------------------------------------
 
 
 class SimplePopModel_NoHidden:
@@ -571,10 +809,15 @@ class SimplePopModel_NoHidden:
         t,
         data,
         target=None,
+        mode=None,
         closedloop=False,
         update_wFF=False,
         update_wOUT=False,
+        update_wEE=False,
     ):
+        if mode is not None:
+            update_wOUT = mode.update_wOUT
+
         # Evaluate data
         x = data.evaluate(t)
 

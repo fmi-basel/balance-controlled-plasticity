@@ -85,16 +85,16 @@ def make_membership_matrices(RNG_Key,
 
     # Lognormal weight scaling
     norm_factor = jnp.exp(sigma_lognorm**2 / 2)
-    M_E = (
-        B_E
-        * jax.random.lognormal(rng3, shape=(nb_exc, nb_ensembles), sigma=sigma_lognorm)
+    G_E = (
+        jax.random.lognormal(rng3, shape=(nb_exc, nb_ensembles), sigma=sigma_lognorm)
         / norm_factor
     )
-    M_I = (
-        B_I
-        * jax.random.lognormal(rng4, shape=(nb_inh, nb_ensembles), sigma=sigma_lognorm)
+    G_I = (
+        jax.random.lognormal(rng4, shape=(nb_inh, nb_ensembles), sigma=sigma_lognorm)
         / norm_factor
     )
+    M_E = B_E * G_E
+    M_I = B_I * G_I
 
     # Column-normalize to unit L2 norm
     M_E = M_E / jnp.linalg.norm(M_E, axis=0)
@@ -102,15 +102,13 @@ def make_membership_matrices(RNG_Key,
     
     if return_binary:
         return B_E, B_I
-    
-    else:
-        return M_E, M_I
+
+    return M_E, M_I
 
 # Upper bound for gEE to guarantee stability
 # # # # # # # # # # # # # #
 
-
-def max_gEE(gII, gIE, gEI, tauE, tauI):
+def get_max_gEE(gII, gIE, gEI, tauE, tauI):
     """upper bound for gEE"""
     B = (gEI * gIE) / (1 + gII)
     first = 1 + B

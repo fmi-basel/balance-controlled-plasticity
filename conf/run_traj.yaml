@@ -18,7 +18,6 @@ dt: 1e-3  # Time step in seconds
 max_period: 2   # maximum frequency of the sinusoidal inputs as proportion of T (must be int)
 
 # Important simulation parameters
-perc_random_memb: 0.0   # Percentage of random memberships
 train_iterations: 4320  # Number of iterations to train on
 train_readout_only: False  # CONTROL: Train only the readout layer
 

@@ -34,6 +34,6 @@ controller:
   k_i: 2.0
   leak: 1.0
   tau: 100e-3
-clip_hidden_weights: False
+clip_weights: False
 clip_val: 1.0
 weight_decay: 0.0
