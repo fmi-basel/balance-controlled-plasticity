@@ -167,27 +167,32 @@ class ExcInhAssemblyVectorField(VectorField):
         ensemble_sizes, sizes_exc, sizes_inh = self._get_hidden_sizes()
         ff_initializer = self._get_FF_init_params()
 
-        g_EI = 1.0 / self.nb_exc_per_ensemble if self.g_EI == 'default' else float(self.g_EI)
+        # Only compute membership/recurrence during init, not during traced apply() calls
+        if not self.has_variable("constants", "memberships"):
+            g_EI = 1.0 / self.nb_exc_per_ensemble if self.g_EI == 'default' else float(self.g_EI)
 
-        membership_matrices, recurrent_weights = construct_membership_and_recurrence(self.RNG_Key,
-                                                                  self.nb_hidden,
-                                                                  self.sizes_hidden,
-                                                                  self.nb_exc_per_ensemble,
-                                                                  self.EI_ratio,
-                                                                  self.alpha,
-                                                                  self.overlap,
-                                                                  g_EI=g_EI,
-                                                                  g_XI=self.g_XI,
-                                                                  g_EE=self.g_EE,
-                                                                  g_II=self.g_II)
-        
+            membership_matrices, recurrent_weights = construct_membership_and_recurrence(self.RNG_Key,
+                                                                      self.nb_hidden,
+                                                                      self.sizes_hidden,
+                                                                      self.nb_exc_per_ensemble,
+                                                                      self.EI_ratio,
+                                                                      self.alpha,
+                                                                      self.overlap,
+                                                                      g_EI=g_EI,
+                                                                      g_XI=self.g_XI,
+                                                                      g_EE=self.g_EE,
+                                                                      g_II=self.g_II)
+        else:
+            membership_matrices = None
+            recurrent_weights = None
+
         # Membership matrices & Recurrent weights as constant variables
         self.membership_matrices = self.variable(
             "constants",  # the collection name
             "memberships",
             lambda: membership_matrices
         )
-        
+
         self.recurrent_weights = self.variable(
             "constants",  # the collection name
             "recurrent_weights",
