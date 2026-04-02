@@ -348,7 +348,7 @@ class ExcInhAssemblyVectorField(VectorField):
         
         # Derivative factor of each layer
         def calc_deriv_factor(M, deriv_exc):
-            return jnp.dot(M.T, jnp.diag(deriv_exc)).dot(M)
+            return (M.T * deriv_exc) @ M
         
         deriv_factors = [calc_deriv_factor(self.M_E[l], exc_derivs[l]) for l in range(self.nb_hidden)]
         

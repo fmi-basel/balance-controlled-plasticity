@@ -187,7 +187,12 @@ class Trainer(flax.struct.PyTreeNode):
         logger.debug("Appending metrics to list.")
         # compute mean of metrics across each batch in epoch.
         metrics = {k: jnp.mean(jnp.stack(v)) for k, v in metrics.items()}
-        
+
+        # Compute weight norm once per epoch (outside JIT)
+        norms = jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), train_state.params)
+        norms = jnp.concatenate([jnp.reshape(v, (-1,)) for v in jax.tree_util.tree_leaves(norms)])
+        metrics['weight_norm'] = jnp.mean(norms)
+
         return train_state, metrics
         
     @abstractmethod
@@ -300,15 +305,10 @@ class Trainer(flax.struct.PyTreeNode):
             metrics['accuracy'] = self._compute_accuracy(y_pred, y_true)
             
         if sol is not None:
-            norms = jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), trainstate.params)
-            # concatenate norms to a 1-D array
-            norms = jnp.concatenate([jnp.reshape(v, (-1,)) for v in jax.tree_util.tree_leaves(norms)])
             metrics['avg_solver_steps'] = jnp.mean(sol.stats['num_steps'])
-            metrics['weight_norm'] = jnp.mean(norms)
-            
         else:
             metrics['avg_solver_steps'] = 0
-            metrics['weight_norm'] = 0
+        metrics['weight_norm'] = 0
 
             
         return metrics
@@ -397,7 +397,7 @@ class FeedbackControlTrainer(Trainer):
             func = lambda x, y: self.loss.get_nudge_targets(x, y, self.target_nudge)
             return vmap(func)(OL_y_pred, y_true)
 
-    @partial(jax.jit, static_argnums=(0))
+    @partial(jax.jit, static_argnums=(0), donate_argnums=(1,))
     def train_step(self, train_state, batch, u0):
           
         # FORWARD PASS
