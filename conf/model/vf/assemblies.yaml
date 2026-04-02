@@ -27,9 +27,11 @@ tauOut: 30e-3
 FF_init: 'default'
 
 # EI connectivity
-perc_overlap: 0.0
-binary_membership: False
-normalize_membership: True
+overlap: 0.0
+g_EI: 'default'
+g_XI: 1.0
+g_EE: 0.0
+g_II: 0.0
 alpha: 0.5
 
 # Jacobian

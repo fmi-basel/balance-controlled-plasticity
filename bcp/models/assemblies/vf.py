@@ -18,7 +18,12 @@ import dataclasses
 from bcp.core.vectorfield import VectorField
 from bcp.core.controller import Controller
 from bcp.core.activation import ActivationFunction
-from bcp.models.assemblies.utils import compute_W_IE, make_membership_matrices
+from bcp.models.assemblies.utils import (
+    make_membership_matrices,
+    get_gIE_analytic,
+    get_W_IE_optimized,
+    get_W_from_g_and_M,
+)
 
 def _get_hidden_sizes(sizes_hidden, nb_hidden, nb_exc_per_ensemble, EI_ratio):
     # Check sizes of hidden layers. 
@@ -35,66 +40,69 @@ def _get_hidden_sizes(sizes_hidden, nb_hidden, nb_exc_per_ensemble, EI_ratio):
     return ensemble_sizes, sizes_exc, sizes_inh
 
 
-def compute_W_EI(M_E, M_I, nb_exc_per_ensemble):
-    
-    return jnp.dot(M_E, M_I.T) * 1/ nb_exc_per_ensemble
-
-
 def construct_membership_and_recurrence(RNG_Key,
                                  nb_hidden: int,
                                  sizes_hidden: Iterable[int],
                                  nb_exc_per_ensemble: int,
                                  EI_ratio: float,
                                  alpha: float,
-                                 perc_overlap: float,
-                                 binary: bool = False,
-                                 normalize: bool = True):    
+                                 overlap: float,
+                                 g_EI: float,
+                                 g_XI: float = 1.0,
+                                 g_EE: float = 0.0,
+                                 g_II: float = 0.0):
     """
-    Construct a LowRankExcInhVectorField object with the given parameters.
+    Construct membership matrices and recurrent weights for the assembly model.
+    Uses analytic W_IE for non-overlapping assemblies, optimization for overlapping.
     """
-    
+
     # if RNG key is an integer, convert it to a PRNGKey
     if isinstance(RNG_Key, int):
         RNG_Key = jax.random.PRNGKey(RNG_Key)
-    
+
     # Get hidden sizes
     ensemble_sizes, sizes_exc, sizes_inh = _get_hidden_sizes(sizes_hidden, nb_hidden, nb_exc_per_ensemble, EI_ratio)
-    
+
     # 1. Make Membership matrices
     M_E = []
     M_I = []
-    
+
     for l in range(nb_hidden):
         RNG_l, RNG_Key = jax.random.split(RNG_Key)
-        
-        prob_memb_overlap = perc_overlap / (100 * ensemble_sizes[l] - perc_overlap * ensemble_sizes[l])
 
-        M_E_l, M_I_l = make_membership_matrices(RNG_l, 
+        M_E_l, M_I_l = make_membership_matrices(RNG_l,
                                                 ensemble_sizes[l],
                                                 sizes_exc[l],
                                                 sizes_inh[l],
-                                                prob_memb_overlap,
-                                                binary=binary,
-                                                normalize=normalize)
+                                                overlap=overlap)
         M_E.append(M_E_l)
         M_I.append(M_I_l)
-        
-    membership_matrices = {'M_E': M_E, 
+
+    membership_matrices = {'M_E': M_E,
                            'M_I': M_I}
-    
+
     # 2. Compute W_EI weights from Membership matrices
-    W_EI = [compute_W_EI(M_E[l], M_I[l], nb_exc_per_ensemble) for l in range(nb_hidden)]
-    
-    # 3. For each layer, optimize W_IE weights to reach a balanced state
+    W_EI = [get_W_from_g_and_M(g_EI, M_E[l], M_I[l]) for l in range(nb_hidden)]
+
+    # 3. Compute W_IE weights: analytic if no overlap, optimized otherwise
+    g_IE_analytic = get_gIE_analytic(alpha, g_II, g_EI, g_EE, g_XI)
+
     W_IE = []
     for l in range(nb_hidden):
-        W_IE_l, _ = compute_W_IE(W_EI[l].T, M_E[l], M_I[l], alpha)
-        
-        W_IE.append(W_IE_l)
-            
+        W_IE_analytic = get_W_from_g_and_M(g_IE_analytic, M_I[l], M_E[l])
+
+        if overlap == 0.0:
+            W_IE.append(W_IE_analytic)
+        else:
+            W_IE_opt, _ = get_W_IE_optimized(
+                W_EI[l].T, M_E[l], M_I[l], g_XI, alpha,
+                initial_W_IE=W_IE_analytic.T,
+            )
+            W_IE.append(W_IE_opt)
+
     recurrent_weights = {'W_IE': W_IE,
                          'W_EI': W_EI}
-    
+
     return membership_matrices, recurrent_weights
 
 
@@ -116,10 +124,12 @@ class ExcInhAssemblyVectorField(VectorField):
     sizes_hidden: Iterable[int]     # size of each hidden layer (nb of ensembles)
     use_bias: bool
     nb_exc_per_ensemble: int        # number of excitatory neurons per ensemble
-    EI_ratio: float                 # ratio of inhibitory to excitatory neurons                  
-    perc_overlap: float             # percent of overlap between ensembles
-    binary_membership: bool         # binary membership matrices
-    normalize_membership: bool      # normalize membership matrices
+    EI_ratio: float                 # ratio of inhibitory to excitatory neurons
+    overlap: float                  # overlap between ensembles (probability)
+    g_EI: Any                       # E-to-I gain ('default' = 1/nb_exc_per_ensemble, or float)
+    g_XI: float                     # feedforward-to-I gain
+    g_EE: float                     # E-to-E gain
+    g_II: float                     # I-to-I gain
     
     # Dynamics
     actE: ActivationFunction
@@ -156,16 +166,20 @@ class ExcInhAssemblyVectorField(VectorField):
     def setup(self):
         ensemble_sizes, sizes_exc, sizes_inh = self._get_hidden_sizes()
         ff_initializer = self._get_FF_init_params()
-                
+
+        g_EI = 1.0 / self.nb_exc_per_ensemble if self.g_EI == 'default' else float(self.g_EI)
+
         membership_matrices, recurrent_weights = construct_membership_and_recurrence(self.RNG_Key,
                                                                   self.nb_hidden,
                                                                   self.sizes_hidden,
                                                                   self.nb_exc_per_ensemble,
                                                                   self.EI_ratio,
                                                                   self.alpha,
-                                                                  self.perc_overlap,
-                                                                  self.binary_membership,
-                                                                  self.normalize_membership)
+                                                                  self.overlap,
+                                                                  g_EI=g_EI,
+                                                                  g_XI=self.g_XI,
+                                                                  g_EE=self.g_EE,
+                                                                  g_II=self.g_II)
         
         # Membership matrices & Recurrent weights as constant variables
         self.membership_matrices = self.variable(
