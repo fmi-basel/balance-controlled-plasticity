@@ -21,6 +21,25 @@ max_period: 2   # maximum frequency of the sinusoidal inputs as proportion of T 
 train_iterations: 4320  # Number of iterations to train on
 train_readout_only: False  # CONTROL: Train only the readout layer
 
+# Optional multi-phase schedule.
+# If empty, legacy single-phase behavior is used from train_iterations/train_readout_only.
+# training_phases:
+#   - name: wie_pretrain
+#     iterations: 2160
+#     closedloop: False
+#     update_wFF: False
+#     update_wOUT: False
+#     update_wEE: False
+#     update_wIE: True
+#   - name: main
+#     iterations: 4320
+#     closedloop: True
+#     update_wFF: True
+#     update_wOUT: True
+#     update_wEE: False
+#     update_wIE: False
+training_phases: []
+
 # Recording
 rec_dt: ${dt}
 rec_every_Nth_iter: 20  # Record every Nth iteration

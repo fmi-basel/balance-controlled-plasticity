@@ -140,14 +140,14 @@ def make_optimizer(lr, steps):
     decay_steps=steps,
     end_value=lr * 0.001,
     )
-    #optimizer = optax.adam(scheduler)
+    # optimizer = optax.adam(scheduler)
     
     scheduler = optax.sgdr_schedule(
-cosine_kwargs=[
-    {"init_value": 0.01 * lr,  "peak_value": lr,        "decay_steps": steps // 3, "end_value": lr * 1e-3, "warmup_steps": int(steps * 0.05)},
-    {"init_value": 0.005 * lr, "peak_value": lr * 0.1,  "decay_steps": steps // 3, "end_value": lr * 1e-5, "warmup_steps": int(steps * 0.05)},
-    {"init_value": 0.001 * lr, "peak_value": lr * 0.01, "decay_steps": steps // 3, "end_value": lr * 1e-7, "warmup_steps": int(steps * 0.05)},
-]
+    cosine_kwargs=[
+        {"init_value": 0.01 * lr,  "peak_value": lr,        "decay_steps": steps // 3, "end_value": lr * 1e-3, "warmup_steps": int(steps * 0.05)},
+        {"init_value": 0.005 * lr, "peak_value": lr * 0.1,  "decay_steps": steps // 3, "end_value": lr * 1e-5, "warmup_steps": int(steps * 0.05)},
+        {"init_value": 0.001 * lr, "peak_value": lr * 0.01, "decay_steps": steps // 3, "end_value": lr * 1e-7, "warmup_steps": int(steps * 0.05)},
+    ]
     )
     optimizer = optax.adam(scheduler)
     return optimizer

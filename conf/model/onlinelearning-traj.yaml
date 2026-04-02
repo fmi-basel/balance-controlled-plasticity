@@ -47,10 +47,19 @@ controller:
 eta_OUT: 0.2
 eta_FF: 0.2
 eta_EE: 0.0
+eta_IE: 0.0
 alpha: 0.5
 use_bias: True
 
-clip_weights: True
+# W_IE init / plasticity
+compute_wIE_method: auto  # auto|analytic|optimized|random_scaled_uniform|zeros
+w_ie_init_scale: 0.0      # used when compute_wIE_method=random_scaled_uniform
+w_ie_project_positive: True
+w_ie_pruning: False
+w_ie_pruning_thresh: 0.01
+w_ie_pruning_start_iter: 0
+
+clip_weights: False
 clip_val: 1.0
 weight_decay: 0.0
 

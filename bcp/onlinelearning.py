@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 
 import time
+import warnings
 from dataclasses import dataclass
 
 from jax import vmap
@@ -25,6 +26,7 @@ class OnlineLearningMode:
     update_wFF: bool = False
     update_wOUT: bool = False
     update_wEE: bool = False
+    update_wIE: bool = False
 
     @classmethod
     def open_loop_eval(cls):
@@ -37,13 +39,31 @@ class OnlineLearningMode:
     @classmethod
     def train_full(cls, update_wEE=False):
         return cls(
-            closedloop=True, update_wFF=True, update_wOUT=True, update_wEE=update_wEE
+            closedloop=True,
+            update_wFF=True,
+            update_wOUT=True,
+            update_wEE=update_wEE,
+            update_wIE=False,
         )
 
     @classmethod
     def train_readout(cls):
         return cls(
-            closedloop=False, update_wFF=False, update_wOUT=True, update_wEE=False
+            closedloop=False,
+            update_wFF=False,
+            update_wOUT=True,
+            update_wEE=False,
+            update_wIE=False,
+        )
+
+    @classmethod
+    def train_wie_only(cls):
+        return cls(
+            closedloop=False,
+            update_wFF=False,
+            update_wOUT=False,
+            update_wEE=False,
+            update_wIE=True,
         )
 
 
@@ -156,6 +176,14 @@ class ExcInhAssemblyOnlineLearningVF:
         random_fb_per_neuron=False,
         only_disinhibitory_feedback=False,
         feedback_to_excitatory=False,
+        eta_IE=0.0,
+        compute_wIE_method=None,
+        w_ie_init_mode="auto",
+        w_ie_init_scale=0.0,
+        w_ie_project_positive=True,
+        w_ie_pruning=False,
+        w_ie_pruning_thresh=0.01,
+        w_ie_pruning_start_iter=0,
         clip_weights=False,
         clip_val=1.0,
         weight_decay=0.000,
@@ -208,6 +236,7 @@ class ExcInhAssemblyOnlineLearningVF:
         self.eta_FF = eta_FF
         self.eta_OUT = eta_OUT
         self.eta_EE = eta_EE
+        self.eta_IE = eta_IE
         self.clip_weights = clip_weights
         self.clip_val = clip_val
         self.weight_decay = weight_decay
@@ -218,6 +247,14 @@ class ExcInhAssemblyOnlineLearningVF:
             else gEE_max
         )
         self.w_ie_log_every = w_ie_log_every
+        self.w_ie_init_mode = (
+            compute_wIE_method if compute_wIE_method is not None else w_ie_init_mode
+        )
+        self.w_ie_init_scale = float(max(w_ie_init_scale, 0.0))
+        self.w_ie_project_positive = w_ie_project_positive
+        self.w_ie_pruning = w_ie_pruning
+        self.w_ie_pruning_thresh = w_ie_pruning_thresh
+        self.w_ie_pruning_start_iter = int(max(w_ie_pruning_start_iter, 0))
 
         # Override tau_bar with min(tauE, tauI) to match the fastest network
         # mode under slow inputs.
@@ -238,7 +275,8 @@ class ExcInhAssemblyOnlineLearningVF:
         self.W_II = get_W_from_g_and_M(self.g_II, self.M_I, self.M_I)
 
         # I-to-E weights (analytic or optimized depending on overlap)
-        self.W_IE = self._init_W_IE(alpha, overlap, w_ie_log_every)
+        self.W_IE = self._init_W_IE(alpha, overlap, w_ie_log_every, self.w_ie_init_mode)
+        self.W_IE_fixed = self.W_IE
 
         # Random feedback weights (stored here for accessibility)
         key_FB, rng_key = random.split(rng_key)
@@ -266,17 +304,25 @@ class ExcInhAssemblyOnlineLearningVF:
     # Initialisation helpers
     # -----------------------------------------------------------------------
 
-    def _init_W_IE(self, alpha, overlap, w_ie_log_every):
-        """Compute I-to-E weight matrix, analytically or via optimisation."""
+    def _init_W_IE(self, alpha, overlap, w_ie_log_every, init_mode):
+        """Initialize I-to-E weight matrix with static or trainable-friendly modes."""
         g_IE_analytic = get_gIE_analytic(
             alpha, self.g_II, self.g_EI, self.g_EE, self.g_XI
         )
         W_IE_analytic = get_W_from_g_and_M(g_IE_analytic, self.M_I, self.M_E)
+        self.g_IE_analytic = g_IE_analytic
+        self.W_IE_analytic = W_IE_analytic
 
-        if overlap == 0.0:
+        mode = init_mode
+
+        if mode == "auto":
+            mode = "analytic" if overlap == 0.0 else "optimized"
+
+        if mode == "analytic":
             self.g_IE = g_IE_analytic
             return W_IE_analytic
-        else:
+
+        if mode == "optimized":
             self.g_IE = None
             W_IE, _ = get_W_IE_optimized(
                 self.W_EI.T,
@@ -288,6 +334,45 @@ class ExcInhAssemblyOnlineLearningVF:
                 initial_W_IE=W_IE_analytic.T,
             )
             return W_IE
+
+        self.g_IE = None
+        if mode == "zeros":
+            return jnp.zeros_like(W_IE_analytic)
+
+        if mode == "random_scaled_uniform":
+            key_wie = random.fold_in(self.rng_key, 17)
+            low = float(self.w_ie_pruning_thresh)
+            high = float(2.0 * self.w_ie_pruning_thresh)
+            return random.uniform(
+                key_wie,
+                shape=W_IE_analytic.shape,
+                minval=low,
+                maxval=high,
+                dtype=jnp.float32,
+            )
+
+        raise ValueError(f"Unsupported w_ie_init_mode: {mode}")
+
+    def _project_W_IE(self, W_IE, phase_iter=0):
+        W_IE_proj = W_IE
+        if self.w_ie_project_positive:
+            W_IE_proj = jax.nn.relu(W_IE_proj)
+        if self.w_ie_pruning:
+            pruning_active = jnp.asarray(
+                phase_iter >= self.w_ie_pruning_start_iter, dtype=jnp.bool_
+            )
+            W_IE_pruned = jnp.where(
+                W_IE_proj < self.w_ie_pruning_thresh, 0.0, W_IE_proj
+            )
+            W_IE_proj = jnp.where(pruning_active, W_IE_pruned, W_IE_proj)
+        return W_IE_proj
+
+    def _resolve_W_IE(self, state, phase_iter=0, W_IE_override=None):
+        if W_IE_override is not None:
+            return self._project_W_IE(W_IE_override, phase_iter=phase_iter)
+        if "W_IE" in state:
+            return self._project_W_IE(state["W_IE"], phase_iter=phase_iter)
+        return self._project_W_IE(self.W_IE_fixed, phase_iter=phase_iter)
 
     def _build_fb_projector(
         self,
@@ -359,7 +444,7 @@ class ExcInhAssemblyOnlineLearningVF:
         return tuple(w.clip(-self.clip_val, self.clip_val) for w in weights)
 
     @partial(jax.jit, static_argnums=(0,))
-    def _get_weights(self, W_FF, W_OUT, B, g_EE_A):
+    def _get_weights(self, W_FF, W_OUT, B, g_EE_A, W_IE):
         """Project low-rank parameters onto the full neuron space.
 
         Recurrent weights W_EI/W_IE/W_II are fixed class attributes.
@@ -377,9 +462,9 @@ class ExcInhAssemblyOnlineLearningVF:
         else:
             W_EE = self._build_W_EE_from_g_EE_A(g_EE_A)
 
-        return W_XE, W_XI, self.W_EI, self.W_IE, W_EE, self.W_II, W_EO, B_E, B_I
+        return W_XE, W_XI, self.W_EI, W_IE, W_EE, self.W_II, W_EO, B_E, B_I
 
-    def convert_params_to_weights(self, W_FF, W_OUT, B, g_EE_A=None):
+    def convert_params_to_weights(self, W_FF, W_OUT, B, g_EE_A=None, W_IE=None):
         """Backward-compatible alias for _get_weights.
 
         g_EE_A is only required when eta_EE != 0. When omitted (eta_EE == 0
@@ -387,7 +472,9 @@ class ExcInhAssemblyOnlineLearningVF:
         """
         if g_EE_A is None:
             g_EE_A = jnp.ones(self.nb_ensembles) * self.g_EE
-        return self._get_weights(W_FF, W_OUT, B, g_EE_A)
+        if W_IE is None:
+            W_IE = self._project_W_IE(self.W_IE_fixed, phase_iter=0)
+        return self._get_weights(W_FF, W_OUT, B, g_EE_A, W_IE)
 
     def _project_g_EE_A(self, g_EE_A):
         return g_EE_A.clip(self.gEE_min, self.gEE_max)
@@ -447,15 +534,15 @@ class ExcInhAssemblyOnlineLearningVF:
         rE = currents["rE"]
 
         # Total feedforward drive to the excitatory population
-        I_ff = currents["I_XE"] + B_E
+        I_ff = currents["I_XE"] + B_E + currents["I_EE"]
 
         duE = (
-            1 / self.tauE * (-uE + I_ff - currents["I_IE"] + currents["I_EE"] + fb_exc)
+            1 / self.tauE * (-uE + I_ff - currents["I_IE"] + fb_exc)
         )
         duI = (
             1
             / self.tauI
-            * (-uI + currents["I_XI"] + B_I + currents["I_EI"] + currents["I_II"] - fb)
+            * (-uI + currents["I_XI"] + B_I + currents["I_EI"] - currents["I_II"] - fb)
         )
         duOut = 1 / self.tauOut * (-uOut + currents["I_EO"])
 
@@ -478,9 +565,11 @@ class ExcInhAssemblyOnlineLearningVF:
         B,
         W_XE,
         B_E,
+        W_IE_state,
         update_wFF,
         update_wOUT,
         update_wEE,
+        update_wIE,
     ):
         """Compute weight update deltas.
 
@@ -519,7 +608,20 @@ class ExcInhAssemblyOnlineLearningVF:
         else:
             dg_EE_A = jnp.zeros_like(state["g_EE_A"])
 
-        return {"W_FF": dWFF, "B": dB, "W_OUT": dWOUT, "g_EE_A": dg_EE_A}
+        if update_wIE and self.eta_IE != 0.0:
+            dWIE = self.eta_IE * jnp.outer(
+                currents["rI"].squeeze(0), error_hidden.squeeze(0)
+            )
+        else:
+            dWIE = jnp.zeros_like(W_IE_state)
+
+        return {
+            "W_FF": dWFF,
+            "B": dB,
+            "W_OUT": dWOUT,
+            "g_EE_A": dg_EE_A,
+            "W_IE": dWIE,
+        }
 
     # -----------------------------------------------------------------------
     # Controller / feedback
@@ -553,12 +655,16 @@ class ExcInhAssemblyOnlineLearningVF:
         update_wFF=False,
         update_wOUT=False,
         update_wEE=False,
+        update_wIE=False,
+        phase_iter=0,
+        W_IE_override=None,
     ):
         if mode is not None:
             closedloop = mode.closedloop
             update_wFF = mode.update_wFF
             update_wOUT = mode.update_wOUT
             update_wEE = mode.update_wEE
+            update_wIE = mode.update_wIE
 
         # Evaluate input
         x = data.evaluate(t)
@@ -581,10 +687,15 @@ class ExcInhAssemblyOnlineLearningVF:
             state["g_EE_A"],
         )
         W_FF, B = self._clip_weights(W_FF, B)
+        W_IE = self._resolve_W_IE(
+            state,
+            phase_iter=phase_iter,
+            W_IE_override=W_IE_override,
+        )
 
         # Project to full neuron space
         W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO, B_E, B_I = self._get_weights(
-            W_FF, W_OUT, B, g_EE_A
+            W_FF, W_OUT, B, g_EE_A, W_IE
         )
 
         # Controller and feedback signal
@@ -607,12 +718,16 @@ class ExcInhAssemblyOnlineLearningVF:
                 B,
                 W_XE,
                 B_E,
+                W_IE,
                 update_wFF,
                 update_wOUT,
                 update_wEE,
+                update_wIE,
             )
         )
         delta_state["ctrl"] = delta_ctrl
+        if "W_IE" not in state:
+            delta_state.pop("W_IE", None)
 
         return delta_state
 
@@ -623,9 +738,10 @@ class ExcInhAssemblyOnlineLearningVF:
 
         W_FF, W_OUT, B = state["W_FF"], state["W_OUT"], state["B"]
         W_FF, B = self._clip_weights(W_FF, B)
+        W_IE = self._resolve_W_IE(state, phase_iter=0)
 
         W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO, B_E, B_I = self._get_weights(
-            W_FF, W_OUT, B, state["g_EE_A"]
+            W_FF, W_OUT, B, state["g_EE_A"], W_IE
         )
 
         currents = self._compute_currents(
@@ -647,6 +763,8 @@ class ExcInhAssemblyOnlineLearningVF:
         delta_state["B"] = jnp.zeros_like(B)
         delta_state["W_OUT"] = jnp.zeros_like(W_OUT)
         delta_state["g_EE_A"] = jnp.zeros_like(state["g_EE_A"])
+        if "W_IE" in state:
+            delta_state["W_IE"] = jnp.zeros_like(W_IE)
 
         return delta_state
 
@@ -664,6 +782,11 @@ class ExcInhAssemblyOnlineLearningVF:
         w_FF_scale = 2 / self.data_dim
         w_OUT_scale = 2 / self.nb_ensembles
 
+        # If using W_EE, we scale down the initial feedforward and output weights
+        if self.g_EE > 0.0:
+            w_FF_scale *= 0.2
+            w_OUT_scale *= 0.2
+
         state["W_FF"] = (
             random.normal(key1, shape=(self.data_dim, self.nb_ensembles)) * w_FF_scale
         )
@@ -675,6 +798,7 @@ class ExcInhAssemblyOnlineLearningVF:
 
         # Assembly-space E-E gain state (diagonal of old W_EE_A representation).
         state["g_EE_A"] = jnp.ones(shape=(self.nb_ensembles,)) * self.g_EE
+        state["W_IE"] = self._project_W_IE(self.W_IE, phase_iter=0)
 
         # Dynamics
         state["uE"] = jnp.zeros(shape=(1, self.nb_exc))
@@ -693,7 +817,27 @@ class ExcInhAssemblyOnlineLearningVF:
 
         return state
 
-    def analyze_run(self, inputs, sol, dt, rec_dt, targets=None, closedloop=False):
+    def project_state(self, state, phase_iter=0):
+        state_proj = dict(state)
+        if "W_IE" in state_proj:
+            state_proj["W_IE"] = self._project_W_IE(
+                state_proj["W_IE"], phase_iter=phase_iter
+            )
+        if "g_EE_A" in state_proj:
+            state_proj["g_EE_A"] = self._project_g_EE_A(state_proj["g_EE_A"])
+        return state_proj
+
+    def analyze_run(
+        self,
+        inputs,
+        sol,
+        dt,
+        rec_dt,
+        targets=None,
+        closedloop=False,
+        phase_iter=0,
+        W_IE_override=None,
+    ):
         out_dict = sol.ys.copy()
         out_dict.pop("ctrl")
 
@@ -716,12 +860,26 @@ class ExcInhAssemblyOnlineLearningVF:
             y = jnp.zeros((inputs.shape[0], self.nb_outputs))
             y_pred = jnp.zeros((inputs.shape[0], self.nb_outputs))
 
+        if W_IE_override is None and "W_IE" not in sol.ys:
+            warnings.warn(
+                "analyze_run() received trajectories without 'W_IE' and no "
+                "W_IE_override; falling back to self.W_IE_fixed for current "
+                "reconstruction.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
         def get_ctrl_fb_currents(x, y, y_pred, state):
             W_FF, W_OUT, B = state["W_FF"], state["W_OUT"], state["B"]
             W_FF, B = self._clip_weights(W_FF, B)
+            W_IE = self._resolve_W_IE(
+                state,
+                phase_iter=phase_iter,
+                W_IE_override=W_IE_override,
+            )
 
             W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO, B_E, B_I = self._get_weights(
-                W_FF, W_OUT, B, state["g_EE_A"]
+                W_FF, W_OUT, B, state["g_EE_A"], W_IE
             )
             ctrl, fb, _, _ = self.get_ctrl_and_fb(
                 state, y_pred, y, closedloop, W_OUT=W_OUT
@@ -731,7 +889,7 @@ class ExcInhAssemblyOnlineLearningVF:
             )
 
             # I_XE reported in the output dict includes the bias
-            I_ff = currents["I_XE"] + B_E
+            I_ff = currents["I_XE"] + B_E + currents["I_EE"]
             error_hidden = (
                 self.alpha * jax.nn.relu(state["I_FF_bar"]) - currents["I_IE"]
             )
@@ -814,6 +972,9 @@ class SimplePopModel_NoHidden:
         update_wFF=False,
         update_wOUT=False,
         update_wEE=False,
+        update_wIE=False,
+        phase_iter=0,
+        W_IE_override=None,
     ):
         if mode is not None:
             update_wOUT = mode.update_wOUT
@@ -878,6 +1039,9 @@ class SimplePopModel_NoHidden:
         # learning traces
         state["eligR"] = jnp.zeros(shape=(1, self.data_dim))
 
+        return state
+
+    def project_state(self, state, phase_iter=0):
         return state
 
     def analyze_run(self, inputs, sol, dt, rec_dt, targets=None, closedloop=False):
