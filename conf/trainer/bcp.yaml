@@ -10,7 +10,7 @@ clip_fb_weights: False
 clip_val: 1.0
 norm_fb_weights: False
 norm_val: 1.0
-clip_params: False
+clip_params: True
 clip_val_params: 1.0
 
 # Gradient norm

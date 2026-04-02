@@ -8,7 +8,7 @@ stateful: False
 # Diffrax parameters
 dt: 1e-3
 T: 2.0
-rtol: 0.0
+rtol: 0.01
 atol: 1e-6
 solver: 
   _target_: diffrax.Tsit5
