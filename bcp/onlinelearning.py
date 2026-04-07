@@ -190,6 +190,7 @@ class ExcInhAssemblyOnlineLearningVF:
         gEE_min=0.0,
         gEE_max="default",  # set by get_max_gEE if 'default'
         w_ie_log_every=1000,
+        w_ie_relu_strength=0.0,
     ):
         if rng_key is None:
             seed = int(1000 * time.time())
@@ -247,6 +248,7 @@ class ExcInhAssemblyOnlineLearningVF:
             else gEE_max
         )
         self.w_ie_log_every = w_ie_log_every
+        self.w_ie_relu_strength = w_ie_relu_strength
         self.w_ie_init_mode = (
             compute_wIE_method if compute_wIE_method is not None else w_ie_init_mode
         )
@@ -275,7 +277,7 @@ class ExcInhAssemblyOnlineLearningVF:
         self.W_II = get_W_from_g_and_M(self.g_II, self.M_I, self.M_I)
 
         # I-to-E weights (analytic or optimized depending on overlap)
-        self.W_IE = self._init_W_IE(alpha, overlap, w_ie_log_every, self.w_ie_init_mode)
+        self.W_IE = self._init_W_IE(alpha, overlap, w_ie_log_every, self.w_ie_init_mode, w_ie_relu_strength)
         self.W_IE_fixed = self.W_IE
 
         # Random feedback weights (stored here for accessibility)
@@ -304,7 +306,7 @@ class ExcInhAssemblyOnlineLearningVF:
     # Initialisation helpers
     # -----------------------------------------------------------------------
 
-    def _init_W_IE(self, alpha, overlap, w_ie_log_every, init_mode):
+    def _init_W_IE(self, alpha, overlap, w_ie_log_every, init_mode, relu_strength=0.0):
         """Initialize I-to-E weight matrix with static or trainable-friendly modes."""
         g_IE_analytic = get_gIE_analytic(
             alpha, self.g_II, self.g_EI, self.g_EE, self.g_XI
@@ -332,6 +334,7 @@ class ExcInhAssemblyOnlineLearningVF:
                 alpha,
                 progress_every=w_ie_log_every,
                 initial_W_IE=W_IE_analytic.T,
+                relu_strength=relu_strength,
             )
             return W_IE
 
