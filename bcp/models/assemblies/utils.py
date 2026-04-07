@@ -180,14 +180,15 @@ def compute_residual(W_IE, alpha, M_E, M_I, W_EI):
     return alpha * M_E - W_IE @ A_mat
 
 @jax.jit
-def loss_fn(params, alpha, M_E, M_I, W_EI):
+def loss_fn(params, alpha, M_E, M_I, W_EI, relu_strength=0.0):
     """
     Frobenius norm^2 of the residual matrix:  || R ||_F^2.
     We'll sum up the squared entries (which is the Frobenius norm squared).
+    relu_strength controls the weight of the ReLU penalty term.
     """
     W_IE = param_to_W_IE(params)
     R = compute_residual(W_IE, alpha, M_E, M_I, W_EI)  # (N, K)
-    return jnp.mean(jnp.square(R) + jax.nn.relu(R))
+    return jnp.mean(jnp.square(R) + relu_strength * jax.nn.relu(R))
 
 def init_W_IE(W_EI, M_E, M_I, alpha):
     """
@@ -205,7 +206,8 @@ def get_W_IE_optimized(
     num_steps=30000,
     lr=1e-3,
     progress_every=1000,
-    initial_W_IE = None,
+    initial_W_IE=None,
+    relu_strength=0.0,
 ):
     """
     Main optimization routine to find W_IE that minimizes || alpha M_E - W_IE A(W_IE) ||_F^2.
@@ -243,7 +245,7 @@ def get_W_IE_optimized(
 
     @jax.jit
     def train_step(params, opt_state):
-        loss, grads = jax.value_and_grad(loss_fn)(params, alpha, M_E, M_I, W_EI)
+        loss, grads = jax.value_and_grad(loss_fn)(params, alpha, M_E, M_I, W_EI, relu_strength)
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         new_params = optax.apply_updates(params, updates)
         new_params = jnp.maximum(new_params, 0.0)  # project onto nonneg orthant
