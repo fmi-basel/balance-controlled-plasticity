@@ -53,6 +53,7 @@ use_bias: True
 
 # W_IE init / plasticity
 compute_wIE_method: auto  # auto|analytic|optimized|random_scaled_uniform|zeros
+w_ie_relu_strength: 1.0
 w_ie_init_scale: 0.0      # used when compute_wIE_method=random_scaled_uniform
 w_ie_project_positive: True
 w_ie_pruning: False
