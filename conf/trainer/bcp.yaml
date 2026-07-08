@@ -4,6 +4,9 @@ defaults:
 
 _target_: bcp.models.assemblies.trainer.BalanceControlled
 
+# Feedback source: analytic (network Jacobian) | random (fixed random FB)
+feedback_mode: analytic
+
 # FB weight modifications
 average_fb_weights: False
 clip_fb_weights: False

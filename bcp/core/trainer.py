@@ -89,7 +89,7 @@ class Trainer(flax.struct.PyTreeNode):
         """Extended TrainState class that contains additional parameters."""
         pass
     
-    def init_trainstate_params(self, params):
+    def init_trainstate_params(self, params, rng):
         """ Initializes the extra parameters of the train state. """
         return {}
     
@@ -118,22 +118,25 @@ class Trainer(flax.struct.PyTreeNode):
         
         # Split RNG
         rng_data, rng_model = jax.random.split(rng)
-        
+        # Feedback RNG derived from the main seed without disturbing the splits
+        # above (keeps 'analytic' runs byte-identical).
+        rng_fb = jax.random.fold_in(rng, 0xFB)
+
         # We can initialize with a single example because the dynamics are
         # v-mapped over the batch dimension.
         batchsize = None
-        
+
         # Get mock data
         x, y = dataset.get_mock_data(batchsize=batchsize,
                                      rng=rng_data,
                                      flatten=self.model.vf.flatten_input)
-        
+
         # Initialize model parameters
         params = self.model.init(rng_model, x, y)
-                
+
         # Extended train state parameters
         additional_fields = {}
-        additional_fields.update(self.init_trainstate_params(params))
+        additional_fields.update(self.init_trainstate_params(params, rng_fb))
         
         # Initialize train state
         train_state = self.ExtTrainState.create(apply_fn=self.model.apply_fun,
@@ -323,6 +326,9 @@ class FeedbackControlTrainer(Trainer):
     - manual gradient computation given the train_state and the steady-state solution
     """
     
+    # Feedback source: 'analytic' (network Jacobian) or 'random' (fixed random FB)
+    feedback_mode: str = "analytic"
+
     # FB weight modifications
     average_fb_weights: bool = False
     clip_fb_weights: bool = False
@@ -412,9 +418,15 @@ class FeedbackControlTrainer(Trainer):
 
         # Calc feedback weights
         logger.debug('calculating feedback weights')
-        fb_weights = self.model.get_fb_weights(train_state.params, 
-                                               OL_state
-                                               )
+        if self.feedback_mode == "random":
+            # Fixed random feedback drawn once at init and stored in train_state
+            bs = batch[0].shape[0]
+            fb_weights = [jnp.broadcast_to(w, (bs,) + w.shape)
+                          for w in train_state.random_fb]
+        else:  # 'analytic' — network Jacobian
+            fb_weights = self.model.get_fb_weights(train_state.params,
+                                                   OL_state
+                                                   )
         fb_weights = self.modify_fb_weights(fb_weights, batch)
 
         # Calc targets

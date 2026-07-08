@@ -367,14 +367,28 @@ class ExcInhAssemblyVectorField(VectorField):
         jac = jax.jacrev(surrogate_func)(output_per_layer, deriv_factors)
 
         for l in range(self.nb_hidden):
-                        
+
             # Project per-ensemble feedback through M_I onto the inhibitory population
             if self.inh_deriv_in_jac:
                 jac[l] = jnp.dot(jac[l], self.M_I[l].T) * jnp.expand_dims(inh_derivs[l], axis=0)
             else:
                 jac[l] = jnp.dot(jac[l], self.M_I[l].T)
-                
+
         return jac
+
+    def init_random_fb(self, key):
+        """ Fixed random per-assembly feedback, projected through M_I.
+        """
+        ensemble_sizes, sizes_exc, sizes_inh = self._get_hidden_sizes()
+
+        fb = []
+        for l in range(self.nb_hidden):
+            key, sub = jax.random.split(key)
+            raw = jax.random.normal(sub, (self.dim_output, ensemble_sizes[l]),
+                                    dtype=self.dtype)
+            fb.append(jnp.dot(raw, self.M_I[l].T))
+
+        return fb
     
     
     def calculate_gradients(self, params, x, vf_state, errors):

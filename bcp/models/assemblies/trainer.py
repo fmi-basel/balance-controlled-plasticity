@@ -3,7 +3,7 @@ import logging
 import jax
 import jax.numpy as jnp
 
-from typing import Iterable
+from typing import Any, Iterable
 
 # local
 from ...core import FeedbackControlTrainer
@@ -26,15 +26,23 @@ class BalanceControlled(FeedbackControlTrainer):
     
     class ExtTrainState(FeedbackControlTrainer.ExtTrainState):
         mean_activity: Iterable[jnp.ndarray]
+        random_fb: Any = None
 
-    def init_trainstate_params(self, params):
+    def init_trainstate_params(self, params, rng):
         """ Initializes the extra parameters of the train state. """
-        
+
         ensemble_sizes, sizes_exc, sizes_inh = self.model.vf._get_hidden_sizes()
-            
+
         mean_activity = [jnp.zeros((s,), dtype=self.model.dtype) for s in sizes_exc]
-        
-        return {'mean_activity': mean_activity}
+
+        extra = {'mean_activity': mean_activity}
+
+        # Fixed random feedback weights: drawn once here and never updated.
+        if self.feedback_mode == "random":
+            extra['random_fb'] = self.model.vf.apply(
+                params, rng, method=self.model.vf.init_random_fb)
+
+        return extra
     
     def update_trainstate_params(self, trainstate, ol_sol, x):
         """ Updates the extra parameters of the train state. """
