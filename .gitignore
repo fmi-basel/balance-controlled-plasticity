@@ -147,3 +147,4 @@ pyproject.toml
 
 .mplconfig/
 .claude/
+uv.lock
