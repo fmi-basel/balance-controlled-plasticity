@@ -174,7 +174,7 @@ class FullyConnectedVectorField(ForwardVectorField):
         """ Calculates the Jacobian at the current VF state """
 
         hidden_layer_state = vf_state[:-1]
-        hidden_layer_derivs = jax.tree_map(self.activation.deriv, hidden_layer_state)
+        hidden_layer_derivs = jax.tree_util.tree_map(self.activation.deriv, hidden_layer_state)
         
         def surrogate_func(state, derivs):
             y = 0

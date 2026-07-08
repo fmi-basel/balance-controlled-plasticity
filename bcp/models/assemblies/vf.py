@@ -340,8 +340,8 @@ class ExcInhAssemblyVectorField(VectorField):
         hidden_layer_state = vf_state[:-1]
         exc_layer_state = [l['exc'] for l in hidden_layer_state]
         inh_layer_state = [l['inh'] for l in hidden_layer_state]
-        exc_derivs = jax.tree_map(self.actE.deriv, exc_layer_state)
-        inh_derivs = jax.tree_map(self.actI.deriv, inh_layer_state) 
+        exc_derivs = jax.tree_util.tree_map(self.actE.deriv, exc_layer_state)
+        inh_derivs = jax.tree_util.tree_map(self.actI.deriv, inh_layer_state) 
 
         # Per-ensemble output of each layer  
         output_per_layer = [jnp.dot(self.actE(exc), self.M_E[l]) for l, exc in enumerate(exc_layer_state)]
