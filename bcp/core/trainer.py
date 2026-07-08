@@ -49,7 +49,7 @@ def normalize_gradients(grads, norm=1.0):
         scale = jnp.where(grad_norm > 0, norm / grad_norm, 1.0)
         return grad * scale
     
-    normalized_grads = jax.tree_map(normalize_leaf, grads)
+    normalized_grads = jax.tree_util.tree_map(normalize_leaf, grads)
     return normalized_grads
     
 
@@ -66,7 +66,7 @@ def clip_nn_params(params_frozendict, param_min, param_max):
     params_dict = unfreeze(params_frozendict)
     
     # 2) Modify the "params" subtree in place
-    params_dict["params"] = jax.tree_map(
+    params_dict["params"] = jax.tree_util.tree_map(
         lambda x: jnp.clip(x, param_min, param_max),
         params_dict["params"]
     )
@@ -462,7 +462,7 @@ class FeedbackControlTrainer(Trainer):
             grads = normalize_gradients(grads, 1.0)
             
         if self.clip_grads:
-            grads = jax.tree_map(lambda x: jnp.clip(x, -self.clip_val_grads, self.clip_val_grads), grads)
+            grads = jax.tree_util.tree_map(lambda x: jnp.clip(x, -self.clip_val_grads, self.clip_val_grads), grads)
         
         logger.debug('applying gradients')
         train_state = train_state.apply_gradients(grads=grads)
@@ -482,7 +482,7 @@ class FeedbackControlTrainer(Trainer):
                                                            OL_y_pred, CL_y_pred, OL_state, CL_state)
         
         # take average update across batch dimension
-        grads = jax.tree_map(lambda x: jnp.mean(x, axis=0), grads)
+        grads = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), grads)
         
         return grads
         

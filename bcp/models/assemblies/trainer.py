@@ -127,7 +127,7 @@ class BalanceControlled(FeedbackControlTrainer):
                                                   errors)
         
         # set grads for constants to zero
-        grads['constants'] = jax.tree_map(lambda x: jnp.zeros_like(x), grads['constants'])
+        grads['constants'] = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), grads['constants'])
         
         return grads    
     

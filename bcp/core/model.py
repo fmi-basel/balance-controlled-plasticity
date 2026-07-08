@@ -146,7 +146,7 @@ class Model(flax.struct.PyTreeNode):
 
             # Remove time dimension from solution
             # Hacky way to replace sol.ys because sol is immutable 
-            object.__setattr__(sol, 'ys', jax.tree_map(lambda x: x.squeeze(axis=0), sol.ys))            
+            object.__setattr__(sol, 'ys', jax.tree_util.tree_map(lambda x: x.squeeze(axis=0), sol.ys))            
             
             state = sol.ys
 
@@ -189,7 +189,7 @@ class Model(flax.struct.PyTreeNode):
         traj_OL, sol_OL = self.traj_openloop(params, x)    
 
         # Extract final state
-        final_state_OL = jax.tree_map(lambda x: x[:,-1,:], traj_OL)
+        final_state_OL = jax.tree_util.tree_map(lambda x: x[:,-1,:], traj_OL)
         
         # Calculate feedback weights
         fb_weights = self.get_fb_weights(params, 
@@ -200,7 +200,7 @@ class Model(flax.struct.PyTreeNode):
         traj_CL, sol_CL = self.traj_closedloop(params, x, y, fb_weights, final_state_OL)    
 
         # Concatenate OL and CL solutions
-        traj = jax.tree_map(lambda x, y: jnp.concatenate((x, y), axis=1), traj_OL, traj_CL)
+        traj = jax.tree_util.tree_map(lambda x, y: jnp.concatenate((x, y), axis=1), traj_OL, traj_CL)
 
         return traj
     
