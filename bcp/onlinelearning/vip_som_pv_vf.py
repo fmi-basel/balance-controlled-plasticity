@@ -55,9 +55,10 @@ class E_PV_VIP_SOM_OnlineLearningVF:
         g_SOMPV=0.14, 
         g_VIPSOM=1.0, 
         g_SOMVIP=0.0,  
-        g_EVIP=0.0,  
+        g_EVIP=0.0,
         g_base_VIP=0.0,  # scalar VIP background gain, projected through M_VIP
         control_to_vip_only=True,  # True: control -> VIP only; False: split VIP/SOM
+        sparsity_to_PV=1.0,  # connection probability for X/PV/E/SOM -> PV weights
         use_bias=True,
         rng_key=None,
         controller=None,
@@ -107,6 +108,14 @@ class E_PV_VIP_SOM_OnlineLearningVF:
         self.g_VIPSOM = g_VIPSOM
         self.g_SOMVIP = g_SOMVIP
         self.g_EVIP = g_EVIP
+
+        # Connection probability for all weights projecting onto PV (from
+        # input, E, PV and SOM). 1.0 = fully connected (no sparsity).
+        if not (0.0 < sparsity_to_PV <= 1.0):
+            raise ValueError(
+                f"sparsity_to_PV must be in (0, 1], got {sparsity_to_PV}."
+            )
+        self.sparsity_to_PV = sparsity_to_PV
 
         # VIP drive / control routing
         self.g_base_VIP = g_base_VIP
@@ -167,38 +176,33 @@ class E_PV_VIP_SOM_OnlineLearningVF:
             self.W_SOME = self.W_SOME * (1.0 - self.p_loop)
             self.g_SOME = self.g_SOME * (1.0 - self.p_loop)
 
-        # Fixed random PV weights. Each matrix is scaled with the number of
-        # presynaptic neurons so that, in expectation, the sum of incoming
-        # weights per postsynaptic PV neuron equals the corresponding g_* scale
-        # (see ``_scaled_random_weights``).
+        # Fixed random PV weights. Each matrix is scaled with nb_presynaptic
+        # so that the sum of incoming weights averages g_*.
+        # Matrices are sparse accoridng to ``sparsity_to_PV``
         key_xpv, key_pvpv, key_epv, key_sompv, self.rng_key = random.split(rng_key, 5)
 
         # Input -> PV (excitatory)
         self.W_XPV = self._scaled_random_weights(
-            key_xpv, self.g_XPV, data_dim, (data_dim, nb_pv)
+            key_xpv, self.g_XPV, data_dim, (data_dim, nb_pv), self.sparsity_to_PV
         )
-        # PV -> PV lateral (positive magnitude, inhibitory in the dynamics).
-        # Autapses are removed, so only nb_pv - 1 presynaptic neurons remain;
-        # scale by that count so the mean column sum still matches g_PVPV.
+        # PV -> PV lateral
         W_PVPV = self._scaled_random_weights(
-            key_pvpv, self.g_PVPV, nb_pv - 1, (nb_pv, nb_pv)
+            key_pvpv, self.g_PVPV, nb_pv - 1, (nb_pv, nb_pv), self.sparsity_to_PV
         )
         # remove autapses
         self.W_PVPV = W_PVPV * (1.0 - jnp.eye(nb_pv, dtype=jnp.float32))
 
         # E -> PV (excitatory)
         self.W_EPV = self._scaled_random_weights(
-            key_epv, self.g_EPV, nb_exc, (nb_exc, nb_pv)
+            key_epv, self.g_EPV, nb_exc, (nb_exc, nb_pv), self.sparsity_to_PV
         )
 
-        # SOM -> PV (positive magnitude, inhibitory in the dynamics)
+        # SOM -> PV
         self.W_SOMPV = self._scaled_random_weights(
-            key_sompv, self.g_SOMPV, nb_som, (nb_som, nb_pv)
+            key_sompv, self.g_SOMPV, nb_som, (nb_som, nb_pv), self.sparsity_to_PV
         )
 
-        # VIP population. ``M_VIP`` shares the same ``M_E`` stream as ``M_SOM``
-        # (make_membership_matrices is deterministic in rng_key), so the E
-        # memberships are identical; we only keep the VIP block.
+        # VIP population.
         _, self.M_VIP = make_membership_matrices(
             rng_key,
             nb_ensembles,
@@ -207,40 +211,37 @@ class E_PV_VIP_SOM_OnlineLearningVF:
             overlap=0.0,
         )
 
-        # Fixed VIP weights, all determined from memberships (see SOM/E above).
-        # VIP -> SOM inhibition (active by default).
+        # VIP -> SOM inhibition 
         self.W_VIPSOM = get_W_from_g_and_M(self.g_VIPSOM, self.M_VIP, self.M_SOM)
-        # Reciprocal SOM -> VIP and E -> VIP (both off by default).
+        
+        # SOM -> VIP and E -> VIP 
         self.W_SOMVIP = get_W_from_g_and_M(self.g_SOMVIP, self.M_SOM, self.M_VIP)
         self.W_EVIP = get_W_from_g_and_M(self.g_EVIP, self.M_E, self.M_VIP)
 
-        # VIP background current: an assembly-level background (g_base_VIP on
-        # every assembly) projected through the VIP memberships, so each VIP cell
-        # is driven proportionally to its total membership.
+        # VIP background current
         b_VIP = self.g_base_VIP * jnp.ones(nb_ensembles)  # [nb_ensembles]
         self.I_BG_VIP = jnp.dot(self.M_VIP, b_VIP)[None, :]  # [1, nb_vip]
+        
         # Compensating SOM background: cancels the tonic VIP -> SOM inhibition
-        # that the VIP background would otherwise impose (I_BG_VIP @ W_VIPSOM).
-        # When g_SOMVIP == 0 this exactly offsets the VIP inhibition at steady
-        # state; when g_SOMVIP > 0 the loop amplification is handled by the
-        # (1 - p_loop) SOM -> E rescale above.
         self.I_base_SOM = jnp.dot(self.I_BG_VIP, self.W_VIPSOM)  # [1, nb_som]
 
     # -----------------------------------------------------------------------
     # Initialisation helpers
     # -----------------------------------------------------------------------
 
-    def _scaled_random_weights(self, key, g, n_pre, shape):
-        """Rectified random weights whose mean column sum equals ``g``.
+    def _scaled_random_weights(self, key, g, n_pre, shape, sparsity=1.0):
+        """Sparse, non-negative random weights whose mean column sum equals ``g``
         """
-        scale = g * math.sqrt(2.0 * math.pi) / n_pre
-        return jax.nn.relu(
-            scale * random.normal(key, shape=shape, dtype=jnp.float32)
+        key_mask, key_mag = random.split(key)
+        mask = random.bernoulli(key_mask, p=sparsity, shape=shape)
+        scale = g * math.sqrt(math.pi / 2.0) / (n_pre * sparsity)
+        magnitude = scale * jnp.abs(
+            random.normal(key_mag, shape=shape, dtype=jnp.float32)
         )
+        return mask * magnitude
 
     def _init_W_SOME(self):
         """Initialize SOM-to-E weight matrix.
-
         We always use analytic calibration here (no overlap) 
         """
         self.g_SOME = get_gIE_analytic(
