@@ -340,9 +340,9 @@ class ExcInhAssemblyOnlineLearningVF:
         vector state["g_EE_A"] when eta_EE != 0.
         """
         W_XE = jnp.dot(W_FF, self.M_E.T)  # [data_dim, nb_exc]
-        W_XI = jnp.dot(W_FF, self.M_I.T)  # [data_dim, nb_inh]
+        W_XI = self.g_XI * jnp.dot(W_FF, self.M_I.T)  # [data_dim, nb_inh]
         B_E = jnp.dot(B, self.M_E.T)
-        B_I = jnp.dot(B, self.M_I.T)
+        B_I = self.g_XI * jnp.dot(B, self.M_I.T)
         W_EO = jnp.dot(self.M_E, W_OUT)  # [nb_exc, nb_outputs]
 
         if self.eta_EE == 0.0:
