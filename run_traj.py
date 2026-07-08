@@ -131,7 +131,7 @@ class SimulationRunner:
         if save_final_only:
             final_state = jax.tree.map(lambda x: x[0], sol.ys)
         else:
-            final_state = jax.tree_map(lambda x: x[-1], sol.ys)
+            final_state = jax.tree.map(lambda x: x[-1], sol.ys)
 
         return final_state, sol
 
@@ -491,12 +491,18 @@ def main(cfg: DictConfig) -> None:
                 results["CL_uOut"] = []
 
             if cfg.rec_weights:
-                results["W_FF"] = []
-                results["W_OUT"] = []
-                results["B"] = []
-                results["g_EE_A"] = []
-                if "W_IE" in state:
-                    results["W_IE"] = []
+                if hasattr(vf, "nb_pv"):
+                    results["W_FF_E"] = []
+                    results["W_FF_I"] = []
+                    results["W_OUT"] = []
+                    results["B"] = []
+                else:
+                    results["W_FF"] = []
+                    results["W_OUT"] = []
+                    results["B"] = []
+                    results["g_EE_A"] = []
+                    if "W_IE" in state:
+                        results["W_IE"] = []
 
         logger.debug("Results dictionary constructed.")
         return rec_iters, results
@@ -538,12 +544,18 @@ def main(cfg: DictConfig) -> None:
             out["OL_uOut"] = []
             out["CL_uOut"] = []
         if cfg.rec_weights:
-            out["W_FF"] = []
-            out["W_OUT"] = []
-            out["B"] = []
-            out["g_EE_A"] = []
-            if "W_IE" in state:
-                out["W_IE"] = []
+            if hasattr(vf, "nb_pv"):
+                out["W_FF_E"] = []
+                out["W_FF_I"] = []
+                out["W_OUT"] = []
+                out["B"] = []
+            else:
+                out["W_FF"] = []
+                out["W_OUT"] = []
+                out["B"] = []
+                out["g_EE_A"] = []
+                if "W_IE" in state:
+                    out["W_IE"] = []
         return out
 
     def record_results(dict, OL_results, CL_results, state):
@@ -599,12 +611,18 @@ def main(cfg: DictConfig) -> None:
                 )
 
             if cfg.rec_weights:
-                dict["W_FF"].append(state["W_FF"])
-                dict["W_OUT"].append(state["W_OUT"])
-                dict["B"].append(state["B"])
-                dict["g_EE_A"].append(state["g_EE_A"])
-                if "W_IE" in dict:
-                    dict["W_IE"].append(state["W_IE"])
+                if hasattr(vectorfield, "nb_pv"):
+                    dict["W_FF_E"].append(state["W_FF_E"])
+                    dict["W_FF_I"].append(state["W_FF_I"])
+                    dict["W_OUT"].append(state["W_OUT"])
+                    dict["B"].append(state["B"])
+                else:
+                    dict["W_FF"].append(state["W_FF"])
+                    dict["W_OUT"].append(state["W_OUT"])
+                    dict["B"].append(state["B"])
+                    dict["g_EE_A"].append(state["g_EE_A"])
+                    if "W_IE" in dict:
+                        dict["W_IE"].append(state["W_IE"])
 
         else:
             dict["mean_abs_balance_error"].append(np.nan)

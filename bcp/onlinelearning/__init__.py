@@ -9,10 +9,12 @@ continue to work unchanged.
 
 from .modes import OnlineLearningMode
 from .assembly_vf import ExcInhAssemblyOnlineLearningVF
+from .vip_som_pv_vf import E_PV_VIP_SOM_OnlineLearningVF
 from .simple_model import SimplePopModel_NoHidden
 
 __all__ = [
     "OnlineLearningMode",
     "ExcInhAssemblyOnlineLearningVF",
+    "E_PV_VIP_SOM_OnlineLearningVF",
     "SimplePopModel_NoHidden",
 ]
