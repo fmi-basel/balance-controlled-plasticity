@@ -19,6 +19,7 @@ precision: float32  # float16, float32 or bfloat16
 
 # Training
 epochs: 50
+epochs_pretrain_fb: 0   # FF-frozen feedback (Q) pre-training epochs; requires feedback_mode=learned*
 batchsize: 100
 eval_interval: 1
 verbose: True

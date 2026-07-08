@@ -1,0 +1,50 @@
+defaults:
+  - activation/relu@actE
+  - activation/relu@actI
+  - controller: leaky-pi
+  - defaults
+  - _self_
+
+_target_: bcp.models.assemblies.vf_learnedfb.LearnedFeedbackAssemblyVectorField
+
+# RNG KEY FOR MEMBERSHIP
+RNG_Key: ${seed}
+
+# Architecture
+nb_hidden: 1
+sizes_hidden: [128]
+use_bias: True
+nb_exc_per_ensemble: 16
+EI_ratio: 4.0
+
+# Dynamics
+fb_to_readout: True
+tauI: 10e-3
+tauE: 30e-3
+tauOut: 30e-3
+
+# Initialization
+FF_init: 'default'
+
+# EI connectivity
+overlap: 0.0
+g_EI: 'default'
+g_XI: 1.0
+g_EE: 0.0
+g_II: 0.0
+alpha: 0.5
+
+# Jacobian
+inh_deriv_in_jac: True
+
+# Learned-feedback noise rule
+# (sigma / tau_eps may be scalars or per-layer lists [l=0 deepest .. l=L-1 proximal])
+sigma: 0.1            # OU noise amplitude injected (per-assembly) into interneurons
+tau_eps: 0.05         # OU correlation time (keep << tau_f)
+tau_f: 0.5            # high-pass constant for control c and interneuron membrane
+tau_lp: 0.05          # low-pass constant for the FF presynaptic input (single-phase)
+beta: 1.0             # leak of the Q leaky-integrator (EMA decay)
+signal_source: membrane   # 'membrane' (compartment-free) | 'compartment'
+update_sign: 1.0          # +1 for membrane, -1 for compartment
+t_settle: 0.0             # gate Q-source accumulation to t > t_settle
+kappa: 0.5                # per-layer rate scaling s_l = (1+kappa)^(L-1-l)
