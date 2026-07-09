@@ -7,10 +7,10 @@ _target_: bcp.models.assemblies.trainer_learnedfb.LearnedFeedbackBalanceControll
 # Feedback source:
 #   analytic            (network Jacobian)
 #   random              (fixed random FB)
-#   learned             (== learned-singlephase; noise-driven learned FB, DEFAULT rule single-phase)
-#   learned-singlephase (single fused noisy run: FF grad + Q source together)
-#   learned-twophase    (extra squash phase for Q, then clean closed-loop for FF)
-# NB: the learned modes require `model.vf=assemblies-learnedfb`.
+#   learned             (learned-singlephase)
+#   learned-singlephase (learned-singlephase)
+#   learned-twophase    (extra phase for FB learning)
+
 feedback_mode: analytic
 
 # FB weight modifications
@@ -43,3 +43,6 @@ q_autoscale_decay: 0.99
 q_update_every: 1
 q_init_scale: 0.01
 q_seed: 0
+
+# Fixed-step solver for the noisy feedback dynamics
+noisy_solver: euler

@@ -14,7 +14,10 @@ from tqdm import tqdm
 
 from flax.core.frozen_dict import FrozenDict, unfreeze, freeze
 
-from diffrax import diffeqsolve, ODETerm, SaveAt, ConstantStepSize, LinearInterpolation
+from diffrax import (
+    diffeqsolve, ODETerm, SaveAt, ConstantStepSize, LinearInterpolation,
+    Euler, Heun, Tsit5,
+)
 
 from bcp.core.trainer import (
     FeedbackControlTrainer,
@@ -55,8 +58,10 @@ def make_ou_paths(key, ts, sizes, tau_eps, dt):
     return paths
 
 
-def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use_fr_error):
-    """Runs the noisy feedback-learning trajectory (batched)"""
+def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use_fr_error,
+                 solver):
+    """Runs the noisy feedback-learning trajectory (batched).
+    """
     vf = model.vf
     T, dt = model.T, model.dt
     ts = jnp.arange(0, T, dt)
@@ -72,7 +77,7 @@ def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use
                             method=vf.noisy_step)
 
         sol = diffeqsolve(
-            ODETerm(f), model.solver, t0=0.0, t1=T, dt0=dt, y0=s0,
+            ODETerm(f), solver, t0=0.0, t1=T, dt0=dt, y0=s0,
             stepsize_controller=ConstantStepSize(), saveat=SaveAt(t1=True), max_steps=None,
         )
         return jax.tree_util.tree_map(lambda a: a[-1], sol.ys)
@@ -80,24 +85,28 @@ def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use
     return vmap(single, in_axes=(0, 0, 0, 0))(x, y, ol_state, eps_paths)
 
 
-def accumulate_squash_source(model, params, x, y_ref, ol_state, Q, eps_paths, use_fr_error=True):
+def accumulate_squash_source(model, params, x, y_ref, ol_state, Q, eps_paths,
+                             use_fr_error=True, solver=None):
     """Controller-squashing feedback source (two-phase or pretrain)"""
     vf = model.vf
     window = jnp.maximum(model.T - vf.t_settle, model.dt)
     final = _noisy_solve(model, params, x, y_ref, ol_state, Q, eps_paths,
-                         accumulate_ff=False, use_fr_error=use_fr_error)
+                         accumulate_ff=False, use_fr_error=use_fr_error,
+                         solver=model.solver if solver is None else solver)
     sources = [final["Qsrc"][l] / window for l in range(vf.nb_hidden)]
     return [jnp.mean(sources[l], axis=0) for l in range(vf.nb_hidden)]
 
 
-def accumulate_single_phase(model, params, x, y, ol_state, Q, eps_paths, use_fr_error=True):
+def accumulate_single_phase(model, params, x, y, ol_state, Q, eps_paths,
+                            use_fr_error=True, solver=None):
     """Single learning phase noisy closed-loop with task target: returns both assembly-space
     feedback source and BCP feedforward gradient"""
     vf = model.vf
     nb_hidden = vf.nb_hidden
     window = jnp.maximum(model.T - vf.t_settle, model.dt)
     final = _noisy_solve(model, params, x, y, ol_state, Q, eps_paths,
-                         accumulate_ff=True, use_fr_error=use_fr_error)
+                         accumulate_ff=True, use_fr_error=use_fr_error,
+                         solver=model.solver if solver is None else solver)
 
     sources = [jnp.mean(final["Qsrc"][l] / window, axis=0) for l in range(nb_hidden)]
 
@@ -121,6 +130,14 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     q_init_scale: float = 0.01         # init scale of the random Q direction
     q_seed: int = 0                    # RNG offset for Q init + noise paths
 
+    # Fixed-step solver for the noise-driven feedback trajectory. The noisy solve
+    # is integrated at constant dt with the noise on the same grid, so a cheap
+    # low-order solver is appropriate and 10-70x faster than the (adaptive) model
+    # solver run at fixed step. 'euler' (recommended) matches Tsit5 to ~6 sig figs
+    # here; 'heun' is 2nd-order/more conservative; 'tsit5'/'model' reproduce the
+    # old (very slow) behaviour.
+    noisy_solver: str = "euler"
+
     class ExtTrainState(BalanceControlled.ExtTrainState):
         Q: Any = None            # list per layer, ensemble space [dim_output, nb_ensembles_l]
         q_src_sq: Any = None     # list per layer, scalar running mean-square (autoscale)
@@ -138,6 +155,19 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             return True, "two_phase"
         return False, None
 
+    def _noisy_solver_instance(self):
+        """Fixed-step diffrax solver used for the noise-driven feedback solve."""
+        name = str(self.noisy_solver).lower()
+        if name in ("model", "default"):
+            return self.model.solver
+        mapping = {"euler": Euler, "heun": Heun, "tsit5": Tsit5}
+        if name not in mapping:
+            raise ValueError(
+                f"Unknown noisy_solver={self.noisy_solver!r}; "
+                f"choose from {sorted(mapping)} (or 'model')."
+            )
+        return mapping[name]()
+
     # ------------------------------------------------------------------ #
     # Train-state init
     # ------------------------------------------------------------------ #
@@ -152,7 +182,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         if not isinstance(vf, LearnedFeedbackAssemblyVectorField):
             raise ValueError(
                 "feedback_mode='learned*' requires a learned-feedback vector field. "
-                "Run with `model.vf=assemblies-learnedfb`."
+                "Add `model/vf=assemblies-learnedfb` "
             )
 
         ensemble_sizes, _, _ = vf._get_hidden_sizes()
@@ -247,7 +277,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         eps_paths = self._make_eps(x, key)
         sources = accumulate_squash_source(
             self.model, train_state.params, x, y_ref, OL_state,
-            list(train_state.Q), eps_paths, self.use_fr_error)
+            list(train_state.Q), eps_paths, self.use_fr_error,
+            solver=self._noisy_solver_instance())
 
         new_Q, new_v = self._apply_q_update(
             train_state.Q, train_state.q_src_sq, sources, train_state.step)
@@ -326,7 +357,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         eps_paths = self._make_eps(x, key)
         sources = accumulate_squash_source(
             self.model, train_state.params, x, y_ref, OL_state,
-            list(train_state.Q), eps_paths, self.use_fr_error)
+            list(train_state.Q), eps_paths, self.use_fr_error,
+            solver=self._noisy_solver_instance())
         train_state = self._update_Q(train_state, sources)
 
         # ---- clean closed-loop with the updated Q -> FF (BCP) gradient ----
@@ -366,7 +398,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         eps_paths = self._make_eps(x, key)
         sources, ff_grad = accumulate_single_phase(
             self.model, train_state.params, x, y_targets, OL_state,
-            list(train_state.Q), eps_paths, self.use_fr_error)
+            list(train_state.Q), eps_paths, self.use_fr_error,
+            solver=self._noisy_solver_instance())
 
         # metrics from the open-loop prediction (no clean closed-loop prediction exists)
         metrics = self.calc_metrics(OL_y_pred, y, train_state, OL_vf_sol)

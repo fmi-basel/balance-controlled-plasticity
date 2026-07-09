@@ -202,7 +202,7 @@ def main(cfg: DictConfig) -> None:
         if not is_learned:
             raise ValueError(
                 "epochs_pretrain_fb > 0 requires trainer.feedback_mode=learned* "
-                "(e.g. `trainer.feedback_mode=learned model.vf=assemblies-learnedfb`)."
+                "(e.g. `trainer.feedback_mode=learned model/vf=assemblies-learnedfb`)."
             )
         if not hasattr(trainer, "pretrain_epoch"):
             raise ValueError(
