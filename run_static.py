@@ -299,15 +299,31 @@ def main(cfg: DictConfig) -> None:
 
             logger.info(f"Test accuracy: {test_metrics.pop('accuracy'):.1f} %")
 
-        # Learned-feedback alignment:
-        # signed cos_F between learned Q and Jacobian.
+        # Learned-feedback metrics: Strong-DFC Condition 1 (primary), relative feedback
+        # strength (Fig 3C), and the cosine alignment (secondary diagnostic).
         if str(getattr(trainer, "feedback_mode", "analytic")).startswith(
             "learned"
-        ) and hasattr(trainer, "feedback_alignment"):
-            align_batch = next(iter(train_data))
-            aligns = [
-                float(a) for a in trainer.feedback_alignment(train_state, align_batch)
-            ]
+        ) and hasattr(trainer, "condition1"):
+            metric_batch = next(iter(train_data))
+
+            # Condition 1 (primary): compliance ratio in [0, 1], 1 = Q lies in row(J).
+            con1 = [float(c) for c in trainer.condition1(train_state, metric_batch)]
+            con1_mean = float(sum(con1) / len(con1))
+            results.setdefault("train_CL_fb_con1_mean", []).append(con1_mean)
+            for l, c in enumerate(con1):
+                results.setdefault(f"train_CL_fb_con1_layer{l}", []).append(c)
+            con1_pl = " ".join(f"L{l}={c:.3f}" for l, c in enumerate(con1))
+            logger.info(f"FB Condition-1: mean {con1_mean:.3f}  [{con1_pl}]")
+
+            # Relative feedback strength ||Qu||/||Wr|| (Fig 3C) — informs norm_val.
+            fbff = [float(r) for r in trainer.feedback_strength_ratio(train_state, metric_batch)]
+            for l, r in enumerate(fbff):
+                results.setdefault(f"train_CL_fb_ratio_layer{l}", []).append(r)
+            fbff_pl = " ".join(f"L{l}={r:.3f}" for l, r in enumerate(fbff))
+            logger.info(f"FB ratio_fb/ff: [{fbff_pl}]")
+
+            # Cosine alignment (secondary; under-reports since Q_ss = Jᵀ M⁻¹).
+            aligns = [float(a) for a in trainer.feedback_alignment(train_state, metric_batch)]
             align_mean = float(sum(aligns) / len(aligns))
             results.setdefault("train_CL_fb_align_mean", []).append(align_mean)
             for l, a in enumerate(aligns):

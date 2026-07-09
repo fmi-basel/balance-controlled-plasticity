@@ -18,18 +18,17 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
     """
 
     # OU noise (scalar or per-layer list; index 0 = deepest / readout-distal)
-    sigma: Any = 0.1          # amplitude injected into the interneurons
-    tau_eps: Any = 0.05       # OU correlation time (keep << tau_f)
+    sigma: Any = 0.005        # amplitude injected into the interneurons (paper uses ~0.005)
+    tau_eps: Any = 0.02       # OU correlation time (keep <~ tau_lp; << tau_f)
 
     # Filter timescales
-    tau_f: float = 0.5        # high-pass constant for control c and membrane
-    tau_lp: float = 0.05      # low-pass constant for the FF presynaptic input (single-phase)
+    tau_f: float = 0.5        # low-pass of control (ũ = u - c_lp) AND FF-presyn debias (paper τ_f)
+    tau_lp: float = 0.02      # low-pass of the inhibitory membrane -> post factor (isolates σε envelope)
 
-    beta: float = 1.0                 # leak of the Q leaky-integrator (EMA decay)
-    signal_source: str = "membrane"   # 'membrane' (compartment-free) | 'compartment'
-    update_sign: float = 1.0          # +1 for membrane, -1 for compartment
+    beta: float = 0.01                # Q leak, folded into the Q gradient (small, weight-decay-like)
+    signal_source: str = "membrane"   # 'membrane' = low-pass(u_inh) | 'compartment' = Qu+σε (paper v^fb)
+    update_sign: float = 1.0          # sign of the anti-Hebbian source (validate empirically)
     t_settle: float = 0.0             # gate source accumulation to t > t_settle
-    kappa: float = 0.5                # per-layer rate scaling s_l = (1+kappa)^(L-1-l)
 
 
     def _sigma_per_layer(self):
@@ -47,9 +46,12 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
         return val
 
     def layer_scaling(self):
-        """s_l = (1 + kappa)^(L - 1 - l); deepest layer (l=0) gets the largest scaling."""
+        """`s_l = (1 + τ_v/τ_ε)^(L-1-l)`.
+        """
         L = self.nb_hidden
-        return tuple((1.0 + self.kappa) ** (L - 1 - l) for l in range(L))
+        tau_v = self.tauE + self.tauI
+        tau_eps = self._tau_eps_per_layer()
+        return tuple((1.0 + tau_v / tau_eps[l]) ** (L - 1 - l) for l in range(L))
 
     # ------------------------------------------------------------------ #
     # Feedback-weight helper functions
@@ -130,9 +132,6 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
 
     def noisy_step(self, state, t, x, y, Q, eps_t, accumulate_ff=False, use_fr_error=True):
         """ODE for the noisy feedback-learning trajectory (single example).
-
-        Controller is ON with target `y`; per-assembly OU noise `eps_t[l]` is projected through M_I onto the interneurons. 
-        When `accumulate_ff`, also accumulate the BCP feedforward gradient.
         """
         state_vf = state["vf"]
         state_ctrl = state["ctrl"]
@@ -177,12 +176,12 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
             delta_inh = 1 / self.tauI * (-u_inh + I_XI + I_EI - fb_drive + noise_l)
             delta_state_vf.append({"exc": delta_exc, "inh": delta_inh})
 
-            # post-synaptic factor (interneuron space)
+            # post-synaptic factor (interneuron space).
             if self.signal_source == "compartment":
                 post_l = fb_drive + noise_l
             else:  # 'membrane'
-                post_l = u_inh - u_inh_lp[l]
-            delta_u_inh_lp.append(1 / self.tau_f * (-u_inh_lp[l] + u_inh))
+                post_l = u_inh_lp[l]
+            delta_u_inh_lp.append(1 / self.tau_lp * (-u_inh_lp[l] + u_inh))
 
             # source: outer(teach, post) in interneuron space, averaged across the
             # assembly by projecting through M_I
@@ -192,7 +191,7 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
             if accumulate_ff:
                 expected = beta_bal * r_exc if use_fr_error else jax.nn.relu(self.alpha * I_XE)
                 eproj = jnp.dot(I_IE - expected, self.M_E[l])        # [nb_ensembles]
-                delta_h_lp.append(1 / self.tau_lp * (-h_lp[l] + h_pre))
+                delta_h_lp.append(1 / self.tau_f * (-h_lp[l] + h_pre))  # FF-presyn debias LP (paper τ_f)
                 delta_gW.append({"kernel": gate * jnp.outer(h_lp[l], eproj),
                                  "bias": gate * eproj})
                 h_pre = jnp.dot(r_exc, self.M_E[l])
@@ -214,7 +213,7 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
 
         if accumulate_ff:
             e_read = ff_inputs[-1] - state_vf[-1]                    # readout error (fb_to_readout)
-            delta_h_lp.append(1 / self.tau_lp * (-h_lp[-1] + h_pre))
+            delta_h_lp.append(1 / self.tau_f * (-h_lp[-1] + h_pre))  # FF-presyn debias LP (paper τ_f)
             delta["h_lp"] = delta_h_lp
             delta["gW"] = delta_gW
             delta["gW_read"] = gate * jnp.outer(h_lp[-1], e_read)

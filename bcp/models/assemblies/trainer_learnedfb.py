@@ -9,6 +9,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import optax
 from jax import vmap
 from tqdm import tqdm
 
@@ -123,24 +124,15 @@ def accumulate_single_phase(model, params, x, y, ol_state, Q, eps_paths,
 class LearnedFeedbackBalanceControlled(BalanceControlled):
 
     # Q update-rule knobs
-    eta_Q: float = 0.1                 # Q leaky-integrator rate (scale-free when autoscale on)
-    q_source_autoscale: bool = True    # per-layer RMSprop-style source autoscale
-    q_autoscale_decay: float = 0.99    # EMA decay of the per-layer source-norm tracker
+    q_lr: float = 0.001                # learning rate of the dedicated Q optimizer (own optax instance)
     q_update_every: int = 1            # refresh Q every N steps
     q_init_scale: float = 0.01         # init scale of the random Q direction
     q_seed: int = 0                    # RNG offset for Q init + noise paths
-
-    # Fixed-step solver for the noise-driven feedback trajectory. The noisy solve
-    # is integrated at constant dt with the noise on the same grid, so a cheap
-    # low-order solver is appropriate and 10-70x faster than the (adaptive) model
-    # solver run at fixed step. 'euler' (recommended) matches Tsit5 to ~6 sig figs
-    # here; 'heun' is 2nd-order/more conservative; 'tsit5'/'model' reproduce the
-    # old (very slow) behaviour.
     noisy_solver: str = "euler"
 
     class ExtTrainState(BalanceControlled.ExtTrainState):
         Q: Any = None            # list per layer, ensemble space [dim_output, nb_ensembles_l]
-        q_src_sq: Any = None     # list per layer, scalar running mean-square (autoscale)
+        q_opt_state: Any = None  # optax state for the dedicated Q optimizer
 
     # ------------------------------------------------------------------ #
     # Mode parsing
@@ -194,10 +186,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
                 self.q_init_scale
                 * jax.random.normal(sub, (vf.dim_output, ensemble_sizes[l]), dtype=self.model.dtype)
             )
-        q_src_sq = [jnp.zeros((), dtype=self.model.dtype) for _ in range(vf.nb_hidden)]
-
         extra["Q"] = Q
-        extra["q_src_sq"] = q_src_sq
+        extra["q_opt_state"] = self._q_optimizer().init(Q)
         return extra
 
     # ------------------------------------------------------------------ #
@@ -241,24 +231,20 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             return jax.nn.sigmoid(OL_y_pred)
         return OL_y_pred
 
-    def _apply_q_update(self, Q, q_src_sq, sources, step):
-        """Q_l <- Q_l + eta_Q*s_l*(update_sign*src_l - beta*Q_l)."""
+    def _q_optimizer(self):
+        """Dedicated optax optimizer for the feedback weights Q (own LR + own state).
+        """
+        return optax.adam(self.q_lr)
+
+    def _q_grads(self, Q, sources):
+        """Hand-built Q gradient`.
+        """
         vf = self.model.vf
         s_l = vf.layer_scaling()
-        rho = self.q_autoscale_decay
-        Qnew, vnew = [], []
-        for l in range(vf.nb_hidden):
-            src = sources[l]
-            if self.q_source_autoscale:
-                v = rho * q_src_sq[l] + (1.0 - rho) * jnp.sum(src ** 2)
-                v_hat = v / (1.0 - jnp.power(rho, step + 1))  # bias correction
-                src = src / (jnp.sqrt(v_hat) + 1e-12)
-                vnew.append(v)
-            else:
-                vnew.append(q_src_sq[l])
-            Q_l = Q[l] + self.eta_Q * s_l[l] * (vf.update_sign * src - vf.beta * Q[l])
-            Qnew.append(Q_l)
-        return Qnew, vnew
+        return [
+            s_l[l] * (-vf.update_sign * sources[l] + vf.beta * Q[l])
+            for l in range(vf.nb_hidden)
+        ]
 
     # ------------------------------------------------------------------ #
     # feedback (Q) pre-training
@@ -266,7 +252,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
     def pretrain_step(self, train_state, batch, u0):
         """One Q update from the controller-squashing source. FF weights
-        (params) are untouched; only Q / q_src_sq / step change."""
+        (params) are untouched; only Q / q_opt_state / step change."""
         x = batch[0]
         vf = self.model.vf
         OL_y_pred, OL_state, _ = self.model.openloop(train_state.params, u0, x)
@@ -280,9 +266,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             list(train_state.Q), eps_paths, self.use_fr_error,
             solver=self._noisy_solver_instance())
 
-        new_Q, new_v = self._apply_q_update(
-            train_state.Q, train_state.q_src_sq, sources, train_state.step)
-        train_state = train_state.replace(Q=new_Q, q_src_sq=new_v, step=train_state.step + 1)
+        train_state = self._update_Q(train_state, sources)
+        train_state = train_state.replace(step=train_state.step + 1)
 
         metrics = {f"salign_layer{l}": self._cosF(train_state.Q[l], jbar[l])
                    for l in range(vf.nb_hidden)}
@@ -335,14 +320,23 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         return train_state
 
     def _update_Q(self, train_state, sources):
-        """Apply the Q update every `q_update_every` steps."""
+        """Apply one Q-optimizer step every `q_update_every` steps."""
+        q_tx = self._q_optimizer()
+
+        def do_step():
+            gQ = self._q_grads(train_state.Q, sources)
+            updates, new_opt_state = q_tx.update(
+                gQ, train_state.q_opt_state, train_state.Q)
+            new_Q = optax.apply_updates(train_state.Q, updates)
+            return list(new_Q), new_opt_state
+
         do_update = (train_state.step % self.q_update_every) == 0
-        new_Q, new_v = jax.lax.cond(
+        new_Q, new_opt_state = jax.lax.cond(
             do_update,
-            lambda: self._apply_q_update(train_state.Q, train_state.q_src_sq, sources, train_state.step),
-            lambda: (list(train_state.Q), list(train_state.q_src_sq)),
+            do_step,
+            lambda: (list(train_state.Q), train_state.q_opt_state),
         )
-        return train_state.replace(Q=new_Q, q_src_sq=new_v)
+        return train_state.replace(Q=new_Q, q_opt_state=new_opt_state)
 
     @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
     def _train_step_two_phase(self, train_state, batch, u0):
@@ -416,12 +410,21 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         return train_state, OL_vf_sol, metrics
 
     # ------------------------------------------------------------------ #
-    # Alignment metric (learned Q vs batch-mean ensemble-space Jacobian)
+    # Alignment / compliance metrics
     # ------------------------------------------------------------------ #
     @staticmethod
     def _cosF(A, B):
         """Frobenius cosine <A,B> / (||A|| ||B||)."""
         return jnp.sum(A * B) / (jnp.linalg.norm(A) * jnp.linalg.norm(B) + 1e-12)
+
+    @staticmethod
+    def _condition1_ratio(Q_l, J_l, ridge=1e-6):
+        """Strong-DFC Condition 1 (Eq 106-107): fraction of ||Q||_F lying in row(J).
+        """
+        m = J_l.shape[0]
+        gram = J_l @ J_l.T + ridge * jnp.eye(m, dtype=J_l.dtype)
+        P = J_l.T @ jnp.linalg.solve(gram, J_l)          # [nb_ens, nb_ens]
+        return jnp.linalg.norm(Q_l @ P) / (jnp.linalg.norm(Q_l) + 1e-12)
 
     def _ensemble_jacobian_mean(self, params, ol_state):
         vf = self.model.vf
@@ -433,9 +436,52 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         return [jnp.mean(per_sample[l], axis=0) for l in range(vf.nb_hidden)]
 
     @partial(jax.jit, static_argnums=(0,))
+    def condition1(self, train_state, batch):
+        vf = self.model.vf
+        u0 = vf.get_initial_state_batchexp(batch[0])
+        _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])
+
+        def _per_sample(vf_state):
+            return vf.apply(train_state.params, vf_state, method=vf.ensemble_jacobian)
+
+        J = jax.vmap(_per_sample)(OL_state["vf"])  # list per layer [batch, dout, nb_ens]
+        out = []
+        for l in range(vf.nb_hidden):
+            Q_l = train_state.Q[l]
+            ratios = jax.vmap(lambda Jb: self._condition1_ratio(Q_l, Jb))(J[l])
+            out.append(jnp.mean(ratios))
+        return out
+
+    @partial(jax.jit, static_argnums=(0,))
+    def feedback_strength_ratio(self, train_state, batch):
+        """per-layer `||Q u||_F / ||W r||_F` at the
+        closed-loop state. 
+        """
+        vf = self.model.vf
+        nb_hidden = vf.nb_hidden
+        x, y = batch[0], batch[1]
+        u0 = vf.get_initial_state_batchexp(x)
+        OL_y_pred, OL_state, _ = self.model.openloop(train_state.params, u0, x)
+        y_targets = self.calculate_targets(OL_y_pred, y)
+        fb_weights = self._learned_fb_weights(train_state, batch)   # list, each [bs, dout, sizes_inh]
+        CL_y_pred, CL_state, _ = self.model.closedloop(
+            train_state.params, OL_state, x, y_targets, fb_weights)
+
+        def per_sample(x_i, vf_state, ctrl_state, yp, yt, fbw):
+            ctrl = vf.controller(yp, yt, ctrl_state)[0]            # [dout]
+            ff = vf.apply(train_state.params, x_i, vf_state, method=vf._compute_ff_inputs)
+            num = [jnp.linalg.norm(jnp.dot(ctrl, fbw[l])) for l in range(nb_hidden)]
+            den = [jnp.linalg.norm(ff[l]["exc"]) for l in range(nb_hidden)]
+            return num, den
+
+        num, den = jax.vmap(per_sample)(
+            x, CL_state["vf"], CL_state["ctrl"], CL_y_pred, y_targets, fb_weights)
+        return [jnp.mean(num[l]) / (jnp.mean(den[l]) + 1e-12) for l in range(nb_hidden)]
+
+    @partial(jax.jit, static_argnums=(0,))
     def feedback_alignment(self, train_state, batch):
-        """Per-layer signed cosine between the learned Q and the batch-mean
-        ensemble-space analytic Jacobian.  Returns a list (len nb_hidden)."""
+        """per-layer signed Frobenius cosine between the learned Q and
+        the batch-mean ensemble-space analytic Jacobian. """
         vf = self.model.vf
         u0 = vf.get_initial_state_batchexp(batch[0])
         _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])

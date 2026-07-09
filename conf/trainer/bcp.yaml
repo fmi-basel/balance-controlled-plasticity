@@ -37,9 +37,7 @@ gate_by_derivative: False
 use_fr_error: False
 
 # Learned feedback (Q) — only active when feedback_mode starts with 'learned'
-eta_Q: 0.1              # Q leaky-integrator rate (scale-free when autoscale on)
-q_source_autoscale: False
-q_autoscale_decay: 0.99
+q_lr: 0.001            # learning rate of the dedicated Q optimizer (Adam, own state)
 q_update_every: 1
 q_init_scale: 0.01
 q_seed: 0
