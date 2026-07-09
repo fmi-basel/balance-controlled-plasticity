@@ -215,12 +215,17 @@ def main(cfg: DictConfig) -> None:
             train_state, pre_metrics = trainer.pretrain_epoch(
                 train_state, train_data, cfg.batchsize
             )
+            con1 = " ".join(
+                f"L{l}={float(pre_metrics[f'con1_layer{l}']):.3f}"
+                for l in range(model.vf.nb_hidden)
+            )
             salign = " ".join(
                 f"L{l}={float(pre_metrics[f'salign_layer{l}']):+.3f}"
                 for l in range(model.vf.nb_hidden)
             )
             logger.info(
-                f"  [Q pretrain] epoch {pre_epoch}/{epochs_pretrain_fb}  cos_F {salign}"
+                f"  [Q pretrain] epoch {pre_epoch}/{epochs_pretrain_fb}  "
+                f"Condition-1 {con1}  (cos_F {salign})"
             )
         tracker.update(train_state)
 

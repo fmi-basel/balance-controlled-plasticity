@@ -269,8 +269,13 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         train_state = self._update_Q(train_state, sources)
         train_state = train_state.replace(step=train_state.step + 1)
 
-        metrics = {f"salign_layer{l}": self._cosF(train_state.Q[l], jbar[l])
-                   for l in range(vf.nb_hidden)}
+        # Metrics for the UPDATED Q (params/OL_state unchanged — FF is frozen).
+        # Condition 1 is the primary compliance metric; cos_F is kept as secondary.
+        con1 = self._condition1_from_ol(train_state.Q, train_state.params, OL_state)
+        metrics = {}
+        for l in range(vf.nb_hidden):
+            metrics[f"con1_layer{l}"] = con1[l]
+            metrics[f"salign_layer{l}"] = self._cosF(train_state.Q[l], jbar[l])
         return train_state, metrics
 
     def pretrain_epoch(self, train_state, train_data, batchsize, max_batches=None, **kwargs):
@@ -435,22 +440,31 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         per_sample = jax.vmap(_calc)(ol_state["vf"])  # list per layer [batch, dout, nb_ens]
         return [jnp.mean(per_sample[l], axis=0) for l in range(vf.nb_hidden)]
 
+    def _condition1_from_ol(self, Q, params, ol_state):
+        """Per-layer Condition-1 ratio from an existing (batched) open-loop state.
+
+        Uses the PER-SAMPLE assembly-space Jacobian (`ensemble_jacobian`, before the M_I
+        inhibitory projection) and averages the ratio over the batch.
+        """
+        vf = self.model.vf
+
+        def _per_sample(vf_state):
+            return vf.apply(params, vf_state, method=vf.ensemble_jacobian)
+
+        J = jax.vmap(_per_sample)(ol_state["vf"])  # list per layer [batch, dout, nb_ens]
+        out = []
+        for l in range(vf.nb_hidden):
+            Q_l = Q[l]
+            ratios = jax.vmap(lambda Jb: self._condition1_ratio(Q_l, Jb))(J[l])
+            out.append(jnp.mean(ratios))
+        return out
+
     @partial(jax.jit, static_argnums=(0,))
     def condition1(self, train_state, batch):
         vf = self.model.vf
         u0 = vf.get_initial_state_batchexp(batch[0])
         _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])
-
-        def _per_sample(vf_state):
-            return vf.apply(train_state.params, vf_state, method=vf.ensemble_jacobian)
-
-        J = jax.vmap(_per_sample)(OL_state["vf"])  # list per layer [batch, dout, nb_ens]
-        out = []
-        for l in range(vf.nb_hidden):
-            Q_l = train_state.Q[l]
-            ratios = jax.vmap(lambda Jb: self._condition1_ratio(Q_l, Jb))(J[l])
-            out.append(jnp.mean(ratios))
-        return out
+        return self._condition1_from_ol(train_state.Q, train_state.params, OL_state)
 
     @partial(jax.jit, static_argnums=(0,))
     def feedback_strength_ratio(self, train_state, batch):
