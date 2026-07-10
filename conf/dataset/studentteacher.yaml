@@ -1,0 +1,27 @@
+# Nonlinear student-teacher regression task (Strong-DFC style)
+defaults:
+  - loss: mse
+  - _self_
+
+_target_: bcp.data.StudentTeacherDataset
+
+name: StudentTeacher
+task: regression
+
+dim_input: 30
+dim_output: 5
+teacher_hidden: [10, 10, 10]   # teacher net: 30-10-10-10-5
+
+n_train: 500
+n_valid: 500
+n_test: 1000
+
+teacher_activation: tanh        # nonlinearity in the teacher's hidden layers
+teacher_gain: 1.0               # weight scale (std of pre-activations)
+standardize_targets: True       # zero-mean/unit-var targets over the training set
+
+teacher_seed: 0
+data_seed: 1
+
+valid_split: 0.0                # unused (splits generated separately)
+OL_eval_subset_split: 0.1

@@ -143,9 +143,16 @@ class Trainer(flax.struct.PyTreeNode):
                                                 params = params,
                                                 tx = self.optimizer,
                                                 **additional_fields)
-    
+
         return train_state
-        
+
+    def reset_optimizer(self, train_state):
+        """
+        Reset the (forward-weight) optimizer state.
+        """
+        new_opt_state = train_state.tx.init(train_state.params)
+        return train_state.replace(opt_state=new_opt_state)
+
     # TRAINING
     # # # # # # # # # # # # # # # #
     
