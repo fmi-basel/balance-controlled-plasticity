@@ -39,16 +39,16 @@ inh_deriv_in_jac: True
 
 # Learned-feedback noise rule
 # (sigma / tau_eps may be scalars or per-layer lists [l=0 deepest .. l=L-1 proximal])
-sigma: 0.005            # OU noise amplitude injected (per-assembly) into interneurons (paper ~0.005)
-tau_eps: 0.02           # OU correlation time (keep <~ tau_filt_post; << tau_filt_presyn)
+sigma: 0.6              # OU noise amplitude injected (per-assembly) into interneurons (studentteacher-tuned; paper ~0.005)
+tau_eps: 0.05           # OU correlation time (keep <~ tau_filt_post; << tau_filt_presyn)
 # Filter timescales: each is the leaky-integrator time constant that PRODUCES the like-named trace.
-tau_filt_presyn: 0.5    # SLOW low-pass -> FF-presyn debias trace h_lp (paper τ_f)
-tau_filt_ctrl: 0.05     # FAST low-pass -> control trace c_lp; teach = ctrl - c_lp (high-pass); ~a few×tau_eps.
+tau_filt_presyn: 0.1    # SLOW low-pass -> FF-presyn debias trace h_lp (paper τ_f)
+tau_filt_ctrl: 0.01     # FAST low-pass -> control trace c_lp; teach = ctrl - c_lp (high-pass); ~a few×tau_eps.
                         # Do NOT set this near T: a slow control high-pass leaves a DC in the teach signal that
                         # contaminates the Q source with an off-manifold term so FB subspace alignment will not climb.
-tau_filt_post: 0.02     # low-pass -> inhibitory membrane trace u_inh_lp (the post factor; isolates σε envelope)
-beta: 0.01           # Q leak, folded into the Q gradient (small, weight-decay-like)
+tau_filt_post: 0.05     # low-pass -> inhibitory membrane trace u_inh_lp (the post factor; slower cleans the deep-layer source)
+beta: 0.1            # Q leak, folded into the Q gradient (small, weight-decay-like)
 signal_source: membrane   # 'membrane' = low-pass(u_inh) | 'compartment' = Qu+σε (paper v^fb)
 update_sign: 1.0          # sign of the anti-Hebbian source (validate empirically)
-t_settle: 0.0             # gate Q-source accumulation to t > t_settle
+t_settle: 0.1             # gate Q-source accumulation to t > t_settle
 # layer scaling s_l = (1 + (tauE+tauI)/tau_eps)^(L-1-l) is derived from the time constants

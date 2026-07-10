@@ -11,7 +11,7 @@ _target_: bcp.models.assemblies.trainer_learnedfb.LearnedFeedbackBalanceControll
 #   learned-singlephase (learned-singlephase)
 #   learned-twophase    (extra phase for FB learning)
 
-feedback_mode: analytic
+feedback_mode: learned-twophase
 
 # FB weight modifications
 average_fb_weights: False
@@ -37,9 +37,9 @@ gate_by_derivative: False
 use_fr_error: False
 
 # Learned feedback (Q) — only active when feedback_mode starts with 'learned'
-q_lr: 0.001            # learning rate of the dedicated Q optimizer (Adam, own state)
+q_lr: 1e-3            # learning rate of the dedicated Q optimizer (Adam, own state)
 q_update_every: 1
-q_init_scale: 0.01
+q_init_scale: 0.1
 q_seed: 0
 
 # Fixed-step solver for the noisy feedback dynamics
