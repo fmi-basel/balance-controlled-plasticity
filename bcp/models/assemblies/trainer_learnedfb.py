@@ -236,13 +236,43 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         """
         return optax.adam(self.q_lr)
 
-    def _q_grads(self, Q, sources):
-        """Hand-built Q gradient`.
+    # ------------------------------------------------------------------ #
+    # Optimizer resets
+    # ------------------------------------------------------------------ #
+    def reset_q_optimizer(self, train_state):
+        """
+        Reset the dedicated feedback-weight (Q) optimizer state.
+
+        Re-initializes the Q optimizer state from the current Q, clearing any
+        accumulated statistics (e.g. Adam moments). The feedback weights Q
+        themselves and the trainer are left unchanged.
+
+        Returns a new train_state with a fresh Q optimizer state.
+        """
+        if train_state.Q is None:
+            raise ValueError(
+                "reset_q_optimizer requires a learned-feedback train_state "
+                "(feedback_mode='learned*'); no Q found."
+            )
+        new_q_opt_state = self._q_optimizer().init(list(train_state.Q))
+        return train_state.replace(q_opt_state=new_q_opt_state)
+
+    def reset_optimizers(self, train_state):
+        """
+        Reset both the forward-weight and feedback-weight (Q) optimizers.
+
+        Convenience wrapper around `reset_optimizer` (forward weights) and
+        `reset_q_optimizer` (feedback weights Q).
+        """
+        return self.reset_q_optimizer(self.reset_optimizer(train_state))
+
+    def _q_grads(self, Q, sources, beta):
+        """Hand-built Q gradient (`beta` is the Q-leak/decay term).
         """
         vf = self.model.vf
         s_l = vf.layer_scaling()
         return [
-            s_l[l] * (-vf.update_sign * sources[l] + vf.beta * Q[l])
+            s_l[l] * (-vf.update_sign * sources[l] + beta * Q[l])
             for l in range(vf.nb_hidden)
         ]
 
@@ -256,7 +286,6 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         x = batch[0]
         vf = self.model.vf
         OL_y_pred, OL_state, _ = self.model.openloop(train_state.params, u0, x)
-        jbar = self._ensemble_jacobian_mean(train_state.params, OL_state)
         y_ref = self._squash_reference(OL_y_pred)
 
         key = jax.random.fold_in(jax.random.PRNGKey(self.q_seed + 7), train_state.step)
@@ -266,16 +295,16 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             list(train_state.Q), eps_paths, self.use_fr_error,
             solver=self._noisy_solver_instance())
 
-        train_state = self._update_Q(train_state, sources)
+        # FF is frozen during pretraining -> no point decaying Q (beta=0).
+        train_state = self._update_Q(train_state, sources, beta=0.0)
         train_state = train_state.replace(step=train_state.step + 1)
 
         # Metrics for the UPDATED Q (params/OL_state unchanged — FF is frozen).
-        # Condition 1 is the primary compliance metric; cos_F is kept as secondary.
-        con1 = self._condition1_from_ol(train_state.Q, train_state.params, OL_state)
+        subalign = self._fb_subspace_alignment_from_ol(
+            train_state.Q, train_state.params, OL_state)
         metrics = {}
         for l in range(vf.nb_hidden):
-            metrics[f"con1_layer{l}"] = con1[l]
-            metrics[f"salign_layer{l}"] = self._cosF(train_state.Q[l], jbar[l])
+            metrics[f"fb_subalign_layer{l}"] = subalign[l]
         return train_state, metrics
 
     def pretrain_epoch(self, train_state, train_data, batchsize, max_batches=None, **kwargs):
@@ -311,25 +340,36 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             return self._train_step_two_phase(train_state, batch, u0)
         return self._train_step_single_phase(train_state, batch, u0)
 
-    def _apply_ff_grads(self, train_state, grads):
-        """Shared: optional grad norm/clip, apply, optional param clip."""
+    def _norm_clip_grads(self, grads):
         if self.norm_grads:
             grads = normalize_gradients(grads, 1.0)
         if self.clip_grads:
             grads = jax.tree_util.tree_map(
                 lambda z: jnp.clip(z, -self.clip_val_grads, self.clip_val_grads), grads)
+        return grads
+
+    def _apply_ff_grads(self, train_state, grads):
+        """Shared: optional grad norm/clip, apply, optional param clip."""
+        grads = self._norm_clip_grads(grads)
         train_state = train_state.apply_gradients(grads=grads)
         if self.clip_params:
             new_params = clip_nn_params(train_state.params, -self.clip_val_params, self.clip_val_params)
             train_state = train_state.replace(params=new_params)
         return train_state
 
-    def _update_Q(self, train_state, sources):
-        """Apply one Q-optimizer step every `q_update_every` steps."""
+    def _update_Q(self, train_state, sources, beta=None):
+        """Apply one Q-optimizer step every `q_update_every` steps.
+
+        `beta` overrides the Q-leak term (defaults to `vf.beta`); pretraining
+        passes `beta=0.0` so the Q matrix does not decay while FF is frozen.
+        """
+        if beta is None:
+            beta = self.model.vf.beta
         q_tx = self._q_optimizer()
 
         def do_step():
-            gQ = self._q_grads(train_state.Q, sources)
+            gQ = self._q_grads(train_state.Q, sources, beta)
+            gQ = self._norm_clip_grads(gQ)   # honor norm_grads / clip_grads for Q too
             updates, new_opt_state = q_tx.update(
                 gQ, train_state.q_opt_state, train_state.Q)
             new_Q = optax.apply_updates(train_state.Q, updates)
@@ -350,7 +390,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         x, y = batch[0], batch[1]
         OL_y_pred, OL_state, OL_vf_sol = self.model.openloop(train_state.params, u0, x)
 
-        # ---- feedback-learning (squash) phase: accumulate source, update Q ----
+        # ---- feedback-learning phase: accumulate source, update Q ----
         y_ref = self._squash_reference(OL_y_pred)
         key = jax.random.fold_in(jax.random.PRNGKey(self.q_seed + 1), train_state.step)
         eps_paths = self._make_eps(x, key)
@@ -418,53 +458,123 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     # Alignment / compliance metrics
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _cosF(A, B):
-        """Frobenius cosine <A,B> / (||A|| ||B||)."""
-        return jnp.sum(A * B) / (jnp.linalg.norm(A) * jnp.linalg.norm(B) + 1e-12)
+    def _fb_subspace_alignment_ratio(Q_l, J_l, ridge=1e-6):
+        """FB-subspace alignment: fraction of ||Q_l||_F lying in row(J_l).
 
-    @staticmethod
-    def _condition1_ratio(Q_l, J_l, ridge=1e-6):
-        """Strong-DFC Condition 1 (Eq 106-107): fraction of ||Q||_F lying in row(J).
+        Both `Q_l` and `J_l` live in inhibitory-population space
+        ([dim_output, sizes_inh]): `Q_l` is the learned feedback projected through
+        M_I, `J_l` is `vf.calculate_jacobian`. Returns a value in [0, 1]; 1 means the
+        (row) space of the projected feedback lies entirely inside row(J).
         """
         m = J_l.shape[0]
         gram = J_l @ J_l.T + ridge * jnp.eye(m, dtype=J_l.dtype)
-        P = J_l.T @ jnp.linalg.solve(gram, J_l)          # [nb_ens, nb_ens]
+        P = J_l.T @ jnp.linalg.solve(gram, J_l)          # [sizes_inh, sizes_inh]
         return jnp.linalg.norm(Q_l @ P) / (jnp.linalg.norm(Q_l) + 1e-12)
 
-    def _ensemble_jacobian_mean(self, params, ol_state):
-        vf = self.model.vf
+    def _fb_subspace_alignment_from_ol(self, Q, params, ol_state):
+        """Per-layer FB-subspace alignment from an existing (batched) open-loop state.
 
-        def _calc(vf_state):
-            return vf.apply(params, vf_state, method=vf.ensemble_jacobian)
-
-        per_sample = jax.vmap(_calc)(ol_state["vf"])  # list per layer [batch, dout, nb_ens]
-        return [jnp.mean(per_sample[l], axis=0) for l in range(vf.nb_hidden)]
-
-    def _condition1_from_ol(self, Q, params, ol_state):
-        """Per-layer Condition-1 ratio from an existing (batched) open-loop state.
-
-        Uses the PER-SAMPLE assembly-space Jacobian (`ensemble_jacobian`, before the M_I
-        inhibitory projection) and averages the ratio over the batch.
+        Compares the learned feedback PROJECTED into inhibitory-population space
+        (`fb_from_Q`, [dim_output, sizes_inh]) against the PER-SAMPLE inhibitory-space
+        Jacobian (`calculate_jacobian`), averaging the ratio over the batch. This is the
+        fair comparison: both operands are the connectivity the network actually uses.
         """
         vf = self.model.vf
+        Q_proj = vf.apply(params, list(Q), method=vf.fb_from_Q)  # list [dim_output, sizes_inh]
 
         def _per_sample(vf_state):
-            return vf.apply(params, vf_state, method=vf.ensemble_jacobian)
+            return vf.apply(params, vf_state, method=vf.calculate_jacobian)
 
-        J = jax.vmap(_per_sample)(ol_state["vf"])  # list per layer [batch, dout, nb_ens]
+        J = jax.vmap(_per_sample)(ol_state["vf"])  # list per layer [batch, dout, sizes_inh]
         out = []
         for l in range(vf.nb_hidden):
-            Q_l = Q[l]
-            ratios = jax.vmap(lambda Jb: self._condition1_ratio(Q_l, Jb))(J[l])
+            Q_l = Q_proj[l]
+            ratios = jax.vmap(lambda Jb: self._fb_subspace_alignment_ratio(Q_l, Jb))(J[l])
             out.append(jnp.mean(ratios))
         return out
 
     @partial(jax.jit, static_argnums=(0,))
-    def condition1(self, train_state, batch):
+    def fb_subspace_alignment(self, train_state, batch):
+        """Per-layer FB-subspace alignment: how much of the projected learned feedback
+        lies in the row space of the inhibitory-space Jacobian (in [0, 1])."""
         vf = self.model.vf
         u0 = vf.get_initial_state_batchexp(batch[0])
         _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])
-        return self._condition1_from_ol(train_state.Q, train_state.params, OL_state)
+        return self._fb_subspace_alignment_from_ol(train_state.Q, train_state.params, OL_state)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def fb_subspace_alignment_ceiling(self, train_state, batch):
+        """Per-layer upper bound on the achievable FB-subspace alignment: the batch-mean
+        inhibitory-space Jacobian used as a stand-in for the projected feedback, scored
+        against each per-sample Jacobian."""
+        vf = self.model.vf
+        u0 = vf.get_initial_state_batchexp(batch[0])
+        _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])
+
+        def _per_sample(vf_state):
+            return vf.apply(train_state.params, vf_state, method=vf.calculate_jacobian)
+
+        J = jax.vmap(_per_sample)(OL_state["vf"])  # list per layer [batch, dout, sizes_inh]
+        out = []
+        for l in range(vf.nb_hidden):
+            jbar = jnp.mean(J[l], axis=0)
+            ratios = jax.vmap(lambda Jb: self._fb_subspace_alignment_ratio(jbar, Jb))(J[l])
+            out.append(jnp.mean(ratios))
+        return out
+
+    @staticmethod
+    def _angle_deg(a, b):
+        """Angle (degrees) between two grad pytrees, flattened to a single vector."""
+        la = jnp.concatenate([x.ravel() for x in jax.tree_util.tree_leaves(a)])
+        lb = jnp.concatenate([x.ravel() for x in jax.tree_util.tree_leaves(b)])
+        cos = jnp.dot(la, lb) / (jnp.linalg.norm(la) * jnp.linalg.norm(lb) + 1e-12)
+        return jnp.degrees(jnp.arccos(jnp.clip(cos, -1.0, 1.0)))
+
+    @partial(jax.jit, static_argnums=(0,))
+    def ff_update_alignment(self, train_state, batch):
+        """Per-block angle (deg) between the FF grads the ACTIVE FB-learning method
+        applies and the FF grads the analytic Jacobian feedback would apply.
+
+        The learned side is *exactly* what the current method applies on that batch:
+        two-phase -> clean closed-loop with the learned feedback; single-phase -> the
+        noisy closed-loop solve with in-ODE FF-grad accumulation. Both the learned and
+        the analytic reference start from the open-loop steady state, as the real train
+        steps do. Grads are compared raw (before norm/clip). Returns a list of length
+        nb_hidden+1: hidden layers first, then the readout.
+        """
+        x, y = batch[0], batch[1]
+        vf = self.model.vf
+        u0 = vf.get_initial_state_batchexp(x)
+        OL_y_pred, OL_state, _ = self.model.openloop(train_state.params, u0, x)
+        y_targets = self.calculate_targets(OL_y_pred, y)
+
+        # analytic reference: exactly what BalanceControlled applies (clean CL from OL steady state)
+        fb_a = self.modify_fb_weights(
+            self.model.get_fb_weights(train_state.params, OL_state), batch)
+        CL_ya, CL_state_a, _ = self.model.closedloop(
+            train_state.params, OL_state, x, y_targets, fb_a)
+        grads_a = self.get_gradients(
+            train_state, x, y, OL_y_pred, CL_ya, OL_state, CL_state_a)
+
+        # learned side: exactly the FF grads the active method applies (dispatch on rule)
+        _, rule = self._parse_mode(self.feedback_mode)  # static -> resolved at trace time
+        if rule == "two_phase":
+            fb_l = self._learned_fb_weights(train_state, batch)
+            CL_yl, CL_state_l, _ = self.model.closedloop(
+                train_state.params, OL_state, x, y_targets, fb_l)
+            grads_l = self.get_gradients(
+                train_state, x, y, OL_y_pred, CL_yl, OL_state, CL_state_l)
+        else:  # single_phase: noisy CL solve + in-ODE FF grad accumulation
+            key = jax.random.fold_in(jax.random.PRNGKey(self.q_seed + 1), train_state.step)
+            eps_paths = self._make_eps(x, key)
+            _, ff_grad = accumulate_single_phase(
+                self.model, train_state.params, x, y_targets, OL_state,
+                list(train_state.Q), eps_paths, self.use_fr_error,
+                solver=self._noisy_solver_instance())
+            grads_l = self._assemble_ff_grads(train_state.params, ff_grad)
+
+        blocks = [f"hidden_{l}" for l in range(vf.nb_hidden)] + ["readout"]
+        return [self._angle_deg(grads_l["params"][b], grads_a["params"][b]) for b in blocks]
 
     @partial(jax.jit, static_argnums=(0,))
     def feedback_strength_ratio(self, train_state, batch):
@@ -491,13 +601,3 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         num, den = jax.vmap(per_sample)(
             x, CL_state["vf"], CL_state["ctrl"], CL_y_pred, y_targets, fb_weights)
         return [jnp.mean(num[l]) / (jnp.mean(den[l]) + 1e-12) for l in range(nb_hidden)]
-
-    @partial(jax.jit, static_argnums=(0,))
-    def feedback_alignment(self, train_state, batch):
-        """per-layer signed Frobenius cosine between the learned Q and
-        the batch-mean ensemble-space analytic Jacobian. """
-        vf = self.model.vf
-        u0 = vf.get_initial_state_batchexp(batch[0])
-        _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])
-        jbar = self._ensemble_jacobian_mean(train_state.params, OL_state)
-        return [self._cosF(train_state.Q[l], jbar[l]) for l in range(vf.nb_hidden)]

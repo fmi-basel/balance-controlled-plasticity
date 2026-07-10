@@ -17,17 +17,18 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
     """Assembly vector field with a noise-driven rule for learning the feedback Q.
     """
 
-    # OU noise (scalar or per-layer list; index 0 = deepest / readout-distal)
-    sigma: Any = 0.005        # amplitude injected into the interneurons (paper uses ~0.005)
-    tau_eps: Any = 0.02       # OU correlation time (keep <~ tau_lp; << tau_f)
+    # OU noise (scalar or per-layer list; index 0 = deepest)
+    sigma: Any = 0.005        # amplitude injected into the interneurons
+    tau_eps: Any = 0.02       # OU correlation time (keep <~ tau_filt_post; << tau_filt_presyn)
 
     # Filter timescales
-    tau_f: float = 0.5        # low-pass of control (ũ = u - c_lp) AND FF-presyn debias (paper τ_f)
-    tau_lp: float = 0.02      # low-pass of the inhibitory membrane -> post factor (isolates σε envelope)
+    tau_filt_presyn: float = 0.5   # low-pass -> FF-presyn debias trace h_lp
+    tau_filt_ctrl: Any = None      # low-pass -> control trace c_lp; teach = ctrl - c_lp
+    tau_filt_post: float = 0.02    # low-pass -> inhibitory membrane trace u_inh_lp
 
     beta: float = 0.01                # Q leak, folded into the Q gradient (small, weight-decay-like)
-    signal_source: str = "membrane"   # 'membrane' = low-pass(u_inh) | 'compartment' = Qu+σε (paper v^fb)
-    update_sign: float = 1.0          # sign of the anti-Hebbian source (validate empirically)
+    signal_source: str = "membrane"   # 'membrane' = low-pass(u_inh) | 'compartment' = Qu+σε 
+    update_sign: float = 1.0          # sign of the anti-Hebbian source
     t_settle: float = 0.0             # gate source accumulation to t > t_settle
 
 
@@ -60,37 +61,6 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
         """project fb weights through inhibitory memberships.
         """
         return [jnp.dot(Q[l], self.M_I[l].T) for l in range(self.nb_hidden)]
-
-    def ensemble_jacobian(self, vf_state):
-        """Analytic feedback in assembly space.
-
-        Returns a list (len nb_hidden) of [dim_output, nb_ensembles_l] matrices.
-        This mirrors `calculate_jacobian` but stops before `jac[l] @ M_I[l].T`.
-        """
-        hidden_layer_state = vf_state[:-1]
-        exc_layer_state = [l["exc"] for l in hidden_layer_state]
-        exc_derivs = jax.tree_util.tree_map(self.actE.deriv, exc_layer_state)
-
-        output_per_layer = [
-            jnp.dot(self.actE(exc), self.M_E[l]) for l, exc in enumerate(exc_layer_state)
-        ]
-
-        def calc_deriv_factor(M, deriv_exc):
-            return (M.T * deriv_exc) @ M
-
-        deriv_factors = [
-            calc_deriv_factor(self.M_E[l], exc_derivs[l]) for l in range(self.nb_hidden)
-        ]
-
-        def surrogate_func(ensemble_outputs, deriv_factors):
-            y = 0
-            for l in range(1, self.nb_hidden):
-                y = jnp.dot(self.hidden[l](y + ensemble_outputs[l - 1]), deriv_factors[l])
-            y = self.readout(y + ensemble_outputs[-1])
-            return y
-
-        jac = jax.jacrev(surrogate_func)(output_per_layer, deriv_factors)
-        return jac  # list of [dim_output, nb_ensembles_l]
 
     # ------------------------------------------------------------------ #
     # Noisy dynamics for feedback (Q) learning
@@ -141,6 +111,7 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
         sig = self._sigma_per_layer()
         gate = jnp.asarray(t > self.t_settle, self.dtype)
         beta_bal = -self.alpha / (self.alpha - 1.0)
+        tau_filt_ctrl = self.tau_filt_presyn if self.tau_filt_ctrl is None else self.tau_filt_ctrl
 
         ff_inputs = self._compute_ff_inputs(x, state_vf)
         y_pred = self.out(state)
@@ -181,7 +152,7 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
                 post_l = fb_drive + noise_l
             else:  # 'membrane'
                 post_l = u_inh_lp[l]
-            delta_u_inh_lp.append(1 / self.tau_lp * (-u_inh_lp[l] + u_inh))
+            delta_u_inh_lp.append(1 / self.tau_filt_post * (-u_inh_lp[l] + u_inh))
 
             # source: outer(teach, post) in interneuron space, averaged across the
             # assembly by projecting through M_I
@@ -191,7 +162,7 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
             if accumulate_ff:
                 expected = beta_bal * r_exc if use_fr_error else jax.nn.relu(self.alpha * I_XE)
                 eproj = jnp.dot(I_IE - expected, self.M_E[l])        # [nb_ensembles]
-                delta_h_lp.append(1 / self.tau_f * (-h_lp[l] + h_pre))  # FF-presyn debias LP (paper τ_f)
+                delta_h_lp.append(1 / self.tau_filt_presyn * (-h_lp[l] + h_pre))  # FF-presyn debias LP (paper τ_f)
                 delta_gW.append({"kernel": gate * jnp.outer(h_lp[l], eproj),
                                  "bias": gate * eproj})
                 h_pre = jnp.dot(r_exc, self.M_E[l])
@@ -206,14 +177,14 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
         delta = {
             "vf": delta_state_vf,
             "ctrl": delta_state_ctrl,
-            "c_lp": 1 / self.tau_f * (-c_lp + ctrl),
+            "c_lp": 1 / tau_filt_ctrl * (-c_lp + ctrl),
             "u_inh_lp": delta_u_inh_lp,
             "Qsrc": delta_Qsrc,
         }
 
         if accumulate_ff:
             e_read = ff_inputs[-1] - state_vf[-1]                    # readout error (fb_to_readout)
-            delta_h_lp.append(1 / self.tau_f * (-h_lp[-1] + h_pre))  # FF-presyn debias LP (paper τ_f)
+            delta_h_lp.append(1 / self.tau_filt_presyn * (-h_lp[-1] + h_pre))  # FF-presyn debias LP (paper τ_f)
             delta["h_lp"] = delta_h_lp
             delta["gW"] = delta_gW
             delta["gW_read"] = gate * jnp.outer(h_lp[-1], e_read)

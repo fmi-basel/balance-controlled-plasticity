@@ -215,17 +215,13 @@ def main(cfg: DictConfig) -> None:
             train_state, pre_metrics = trainer.pretrain_epoch(
                 train_state, train_data, cfg.batchsize
             )
-            con1 = " ".join(
-                f"L{l}={float(pre_metrics[f'con1_layer{l}']):.3f}"
-                for l in range(model.vf.nb_hidden)
-            )
-            salign = " ".join(
-                f"L{l}={float(pre_metrics[f'salign_layer{l}']):+.3f}"
+            subalign = " ".join(
+                f"L{l}={float(pre_metrics[f'fb_subalign_layer{l}']):.3f}"
                 for l in range(model.vf.nb_hidden)
             )
             logger.info(
                 f"  [Q pretrain] epoch {pre_epoch}/{epochs_pretrain_fb}  "
-                f"Condition-1 {con1}  (cos_F {salign})"
+                f"FB subspace-alignment {subalign}"
             )
         tracker.update(train_state)
 
@@ -304,21 +300,30 @@ def main(cfg: DictConfig) -> None:
 
             logger.info(f"Test accuracy: {test_metrics.pop('accuracy'):.1f} %")
 
-        # Learned-feedback metrics: Strong-DFC Condition 1 (primary), relative feedback
-        # strength (Fig 3C), and the cosine alignment (secondary diagnostic).
+        # Learned-feedback metrics: FB-subspace alignment (compliance) + its ceiling,
+        # relative feedback strength (Fig 3C), and the functional FF-update angle.
         if str(getattr(trainer, "feedback_mode", "analytic")).startswith(
             "learned"
-        ) and hasattr(trainer, "condition1"):
+        ) and hasattr(trainer, "fb_subspace_alignment"):
             metric_batch = next(iter(train_data))
 
-            # Condition 1 (primary): compliance ratio in [0, 1], 1 = Q lies in row(J).
-            con1 = [float(c) for c in trainer.condition1(train_state, metric_batch)]
-            con1_mean = float(sum(con1) / len(con1))
-            results.setdefault("train_CL_fb_con1_mean", []).append(con1_mean)
-            for l, c in enumerate(con1):
-                results.setdefault(f"train_CL_fb_con1_layer{l}", []).append(c)
-            con1_pl = " ".join(f"L{l}={c:.3f}" for l, c in enumerate(con1))
-            logger.info(f"FB Condition-1: mean {con1_mean:.3f}  [{con1_pl}]")
+            # FB-subspace alignment: compliance ratio in [0, 1], 1 = projected Q lies in row(J).
+            subalign = [float(c) for c in trainer.fb_subspace_alignment(train_state, metric_batch)]
+            subalign_mean = float(sum(subalign) / len(subalign))
+            results.setdefault("train_CL_fb_subalign_mean", []).append(subalign_mean)
+            for l, c in enumerate(subalign):
+                results.setdefault(f"train_CL_fb_subalign_layer{l}", []).append(c)
+            subalign_pl = " ".join(f"L{l}={c:.3f}" for l, c in enumerate(subalign))
+            logger.info(f"FB subspace-alignment: mean {subalign_mean:.3f}  [{subalign_pl}]")
+
+            # FB-subspace-alignment ceiling: per-layer upper bound (batch-averaged Jacobian
+            # as stand-in Q). Differs by layer (deep layers < 1) — the target Q can approach.
+            if hasattr(trainer, "fb_subspace_alignment_ceiling"):
+                ceil = [float(c) for c in trainer.fb_subspace_alignment_ceiling(train_state, metric_batch)]
+                for l, c in enumerate(ceil):
+                    results.setdefault(f"train_CL_fb_subalign_ceil_layer{l}", []).append(c)
+                ceil_pl = " ".join(f"L{l}={c:.3f}" for l, c in enumerate(ceil))
+                logger.info(f"FB subspace-alignment ceiling: [{ceil_pl}]")
 
             # Relative feedback strength ||Qu||/||Wr|| (Fig 3C) — informs norm_val.
             fbff = [float(r) for r in trainer.feedback_strength_ratio(train_state, metric_batch)]
@@ -327,14 +332,16 @@ def main(cfg: DictConfig) -> None:
             fbff_pl = " ".join(f"L{l}={r:.3f}" for l, r in enumerate(fbff))
             logger.info(f"FB ratio_fb/ff: [{fbff_pl}]")
 
-            # Cosine alignment (secondary; under-reports since Q_ss = Jᵀ M⁻¹).
-            aligns = [float(a) for a in trainer.feedback_alignment(train_state, metric_batch)]
-            align_mean = float(sum(aligns) / len(aligns))
-            results.setdefault("train_CL_fb_align_mean", []).append(align_mean)
-            for l, a in enumerate(aligns):
-                results.setdefault(f"train_CL_fb_align_layer{l}", []).append(a)
-            perlayer = " ".join(f"L{l}={a:+.3f}" for l, a in enumerate(aligns))
-            logger.info(f"FB alignment (cos_F): mean {align_mean:+.3f}  [{perlayer}]")
+            # Functional FF-update angle (deg): learned-feedback grads vs analytic-feedback grads.
+            if hasattr(trainer, "ff_update_alignment"):
+                angles = [float(a) for a in trainer.ff_update_alignment(train_state, metric_batch)]
+                ang_mean = float(sum(angles) / len(angles))
+                results.setdefault("train_CL_fb_ffangle_mean", []).append(ang_mean)
+                labels = [f"L{l}" for l in range(model.vf.nb_hidden)] + ["readout"]
+                for lbl, a in zip(labels, angles):
+                    results.setdefault(f"train_CL_fb_ffangle_{lbl}", []).append(a)
+                ang_pl = " ".join(f"{lbl}={a:.1f}" for lbl, a in zip(labels, angles))
+                logger.info(f"FB FF-update angle (deg): mean {ang_mean:.1f}  [{ang_pl}]")
 
         logger.info("")
 
