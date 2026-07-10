@@ -296,7 +296,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             solver=self._noisy_solver_instance())
 
         # FF is frozen during pretraining -> no point decaying Q (beta=0).
-        train_state = self._update_Q(train_state, sources, beta=0.0)
+        # Pretraining always updates Q every step, regardless of q_update_every.
+        train_state = self._update_Q(train_state, sources, beta=0.0, force_update=True)
         train_state = train_state.replace(step=train_state.step + 1)
 
         # Metrics for the UPDATED Q (params/OL_state unchanged — FF is frozen).
@@ -357,11 +358,13 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             train_state = train_state.replace(params=new_params)
         return train_state
 
-    def _update_Q(self, train_state, sources, beta=None):
+    def _update_Q(self, train_state, sources, beta=None, force_update=False):
         """Apply one Q-optimizer step every `q_update_every` steps.
 
         `beta` overrides the Q-leak term (defaults to `vf.beta`); pretraining
         passes `beta=0.0` so the Q matrix does not decay while FF is frozen.
+        `force_update=True` bypasses the `q_update_every` gate so Q is refreshed
+        on every call (used during pretraining).
         """
         if beta is None:
             beta = self.model.vf.beta
@@ -375,7 +378,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             new_Q = optax.apply_updates(train_state.Q, updates)
             return list(new_Q), new_opt_state
 
-        do_update = (train_state.step % self.q_update_every) == 0
+        do_update = force_update or ((train_state.step % self.q_update_every) == 0)
         new_Q, new_opt_state = jax.lax.cond(
             do_update,
             do_step,
@@ -575,6 +578,47 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
 
         blocks = [f"hidden_{l}" for l in range(vf.nb_hidden)] + ["readout"]
         return [self._angle_deg(grads_l["params"][b], grads_a["params"][b]) for b in blocks]
+
+    @partial(jax.jit, static_argnums=(0,))
+    def ff_update_alignment_floor(self, train_state, batch):
+        """Per-block lower bound (deg) on the achievable FF-update angle.
+
+        Analog of `fb_subspace_alignment_ceiling` for the FF-update metric: the learned
+        feedback is a *single shared* matrix (broadcast over the batch), while the analytic
+        reference is per-sample. The best any shared feedback can do is the batch-averaged
+        Jacobian; here we run the clean closed loop with that batch-mean feedback and measure
+        the angle of the resulting FF grads against the per-sample analytic reference. This is
+        a floor: no shared feedback (including the learned Q) can beat this angle, and it is
+        layer-dependent (small where per-sample Jacobians agree, larger where they scatter).
+        Returns a list of length nb_hidden+1: hidden layers first, then the readout.
+        """
+        x, y = batch[0], batch[1]
+        vf = self.model.vf
+        u0 = vf.get_initial_state_batchexp(x)
+        OL_y_pred, OL_state, _ = self.model.openloop(train_state.params, u0, x)
+        y_targets = self.calculate_targets(OL_y_pred, y)
+
+        # analytic reference: per-sample Jacobian feedback (exactly what BalanceControlled applies)
+        fb_a = self.modify_fb_weights(
+            self.model.get_fb_weights(train_state.params, OL_state), batch)
+        CL_ya, CL_state_a, _ = self.model.closedloop(
+            train_state.params, OL_state, x, y_targets, fb_a)
+        grads_a = self.get_gradients(
+            train_state, x, y, OL_y_pred, CL_ya, OL_state, CL_state_a)
+
+        # floor: best a *shared* feedback can do -> batch-mean Jacobian, broadcast over the batch,
+        # then the same clip/norm as the analytic path (identical magnitude to the learned Q).
+        bs = x.shape[0]
+        fb_raw = self.model.get_fb_weights(train_state.params, OL_state)  # list [bs, dout, sizes_inh]
+        fb_bar = [jnp.broadcast_to(jnp.mean(w, axis=0), (bs,) + w.shape[1:]) for w in fb_raw]
+        fb_bar = self.modify_fb_weights(fb_bar, batch)
+        CL_yb, CL_state_b, _ = self.model.closedloop(
+            train_state.params, OL_state, x, y_targets, fb_bar)
+        grads_b = self.get_gradients(
+            train_state, x, y, OL_y_pred, CL_yb, OL_state, CL_state_b)
+
+        blocks = [f"hidden_{l}" for l in range(vf.nb_hidden)] + ["readout"]
+        return [self._angle_deg(grads_b["params"][b], grads_a["params"][b]) for b in blocks]
 
     @partial(jax.jit, static_argnums=(0,))
     def feedback_strength_ratio(self, train_state, batch):
