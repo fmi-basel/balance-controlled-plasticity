@@ -60,7 +60,7 @@ def make_ou_paths(key, ts, sizes, tau_eps, dt):
 
 
 def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use_fr_error,
-                 solver):
+                 solver, assembly_current=0.0):
     """Runs the noisy feedback-learning trajectory (batched).
     """
     vf = model.vf
@@ -75,6 +75,7 @@ def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use
         def f(t, st, args):
             eps_t = [interps[l].evaluate(t) for l in range(nb_hidden)]
             return vf.apply(params, st, t, xi, yi, Q, eps_t, accumulate_ff, use_fr_error,
+                            assembly_current,
                             method=vf.noisy_step)
 
         sol = diffeqsolve(
@@ -87,13 +88,14 @@ def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use
 
 
 def accumulate_squash_source(model, params, x, y_ref, ol_state, Q, eps_paths,
-                             use_fr_error=True, solver=None):
+                             use_fr_error=True, solver=None, assembly_current=0.0):
     """Controller-squashing feedback source (two-phase or pretrain)"""
     vf = model.vf
     window = jnp.maximum(model.T - vf.t_settle, model.dt)
     final = _noisy_solve(model, params, x, y_ref, ol_state, Q, eps_paths,
                          accumulate_ff=False, use_fr_error=use_fr_error,
-                         solver=model.solver if solver is None else solver)
+                         solver=model.solver if solver is None else solver,
+                         assembly_current=assembly_current)
     sources = [final["Qsrc"][l] / window for l in range(vf.nb_hidden)]
     return [jnp.mean(sources[l], axis=0) for l in range(vf.nb_hidden)]
 
@@ -124,11 +126,14 @@ def accumulate_single_phase(model, params, x, y, ol_state, Q, eps_paths,
 class LearnedFeedbackBalanceControlled(BalanceControlled):
 
     # Q update-rule knobs
-    q_lr: float = 0.001                # learning rate of the dedicated Q optimizer (own optax instance)
+    q_lr: float = 0.001                # LR of the dedicated Q optimizer during joint (FF+Q) training
+    q_lr_pretraining: float = None     # LR of the Q optimizer during FF-frozen pretraining; None -> q_lr
     q_update_every: int = 1            # refresh Q every N steps
     q_init_scale: float = 0.01         # init scale of the random Q direction
     q_seed: int = 0                    # RNG offset for Q init + noise paths
     noisy_solver: str = "euler"
+    inject_current_during_fb_learning: bool = False
+    fb_learning_current: float = 1.0
 
     class ExtTrainState(BalanceControlled.ExtTrainState):
         Q: Any = None            # list per layer, ensemble space [dim_output, nb_ensembles_l]
@@ -231,10 +236,25 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             return jax.nn.sigmoid(OL_y_pred)
         return OL_y_pred
 
-    def _q_optimizer(self):
+    def _q_optimizer(self, pretraining=False):
         """Dedicated optax optimizer for the feedback weights Q (own LR + own state).
+
+        FF-frozen pretraining uses `q_lr_pretraining` when set; joint training (and
+        anything else) uses `q_lr`. Adam's state layout is independent of the learning
+        rate, so a state initialized with either LR is interchangeable between phases.
         """
-        return optax.adam(self.q_lr)
+        lr = self.q_lr
+        if pretraining and self.q_lr_pretraining is not None:
+            lr = self.q_lr_pretraining
+        return optax.adam(lr)
+
+    def _assembly_current_for_fb_learning(self):
+        """Assembly-space current used only by the separate Q-learning phase."""
+        if not self.inject_current_during_fb_learning:
+            return 0.0
+        if self.fb_learning_current < 0.0:
+            raise ValueError("fb_learning_current must be non-negative.")
+        return self.fb_learning_current
 
     # ------------------------------------------------------------------ #
     # Optimizer resets
@@ -293,11 +313,14 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         sources = accumulate_squash_source(
             self.model, train_state.params, x, y_ref, OL_state,
             list(train_state.Q), eps_paths, self.use_fr_error,
-            solver=self._noisy_solver_instance())
+            solver=self._noisy_solver_instance(),
+            assembly_current=self._assembly_current_for_fb_learning())
 
         # FF is frozen during pretraining -> no point decaying Q (beta=0).
-        # Pretraining always updates Q every step, regardless of q_update_every.
-        train_state = self._update_Q(train_state, sources, beta=0.0, force_update=True)
+        # Pretraining always updates Q every step, regardless of q_update_every,
+        # and uses the pretraining Q learning rate (q_lr_pretraining).
+        train_state = self._update_Q(train_state, sources, beta=0.0, force_update=True,
+                                     pretraining=True)
         train_state = train_state.replace(step=train_state.step + 1)
 
         # Metrics for the UPDATED Q (params/OL_state unchanged — FF is frozen).
@@ -339,6 +362,12 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             return FeedbackControlTrainer.train_step(self, train_state, batch, u0)
         if rule == "two_phase":
             return self._train_step_two_phase(train_state, batch, u0)
+        if self.inject_current_during_fb_learning:
+            raise ValueError(
+                "inject_current_during_fb_learning is only supported for the separate "
+                "Q-learning phase in learned-twophase training (and Q pretraining); "
+                "it is not supported by single-phase feedback learning."
+            )
         return self._train_step_single_phase(train_state, batch, u0)
 
     def _norm_clip_grads(self, grads):
@@ -358,17 +387,18 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             train_state = train_state.replace(params=new_params)
         return train_state
 
-    def _update_Q(self, train_state, sources, beta=None, force_update=False):
+    def _update_Q(self, train_state, sources, beta=None, force_update=False, pretraining=False):
         """Apply one Q-optimizer step every `q_update_every` steps.
 
         `beta` overrides the Q-leak term (defaults to `vf.beta`); pretraining
         passes `beta=0.0` so the Q matrix does not decay while FF is frozen.
         `force_update=True` bypasses the `q_update_every` gate so Q is refreshed
-        on every call (used during pretraining).
+        on every call (used during pretraining). `pretraining=True` selects the
+        pretraining Q learning rate (`q_lr_pretraining`).
         """
         if beta is None:
             beta = self.model.vf.beta
-        q_tx = self._q_optimizer()
+        q_tx = self._q_optimizer(pretraining=pretraining)
 
         def do_step():
             gQ = self._q_grads(train_state.Q, sources, beta)
@@ -400,7 +430,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         sources = accumulate_squash_source(
             self.model, train_state.params, x, y_ref, OL_state,
             list(train_state.Q), eps_paths, self.use_fr_error,
-            solver=self._noisy_solver_instance())
+            solver=self._noisy_solver_instance(),
+            assembly_current=self._assembly_current_for_fb_learning())
         train_state = self._update_Q(train_state, sources)
 
         # ---- clean closed-loop with the updated Q -> FF (BCP) gradient ----

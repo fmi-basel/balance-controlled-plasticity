@@ -100,8 +100,12 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
 
         return state
 
-    def noisy_step(self, state, t, x, y, Q, eps_t, accumulate_ff=False, use_fr_error=True):
+    def noisy_step(self, state, t, x, y, Q, eps_t, accumulate_ff=False,
+                   use_fr_error=True, assembly_current=0.0):
         """ODE for the noisy feedback-learning trajectory (single example).
+
+        ``assembly_current`` is a steady drive per assembly, projected through
+        M_E / M_I so neuronal current follows the assembly memberships.
         """
         state_vf = state["vf"]
         state_ctrl = state["ctrl"]
@@ -137,14 +141,19 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
             # feedback: ensemble Q -> interneurons; per-assembly noise -> interneurons
             fb_drive = jnp.dot(ctrl, jnp.dot(Q[l], self.M_I[l].T))   # [sizes_inh]
             noise_l = sig[l] * jnp.dot(self.M_I[l], eps_t[l])        # [sizes_inh]
+            current_l = assembly_current * jnp.ones(
+                self.M_E[l].shape[1], dtype=self.dtype)
+            exc_current = jnp.dot(self.M_E[l], current_l)
+            inh_current = jnp.dot(self.M_I[l], current_l)
 
             I_XE = ff_inputs[l]["exc"]
             I_IE = jnp.dot(r_inh, self.W_IE[l])
-            delta_exc = 1 / self.tauE * (-u_exc + I_XE - I_IE)
+            delta_exc = 1 / self.tauE * (-u_exc + I_XE - I_IE + exc_current)
 
             I_XI = ff_inputs[l]["inh"]
             I_EI = jnp.dot(r_exc, self.W_EI[l])
-            delta_inh = 1 / self.tauI * (-u_inh + I_XI + I_EI - fb_drive + noise_l)
+            delta_inh = 1 / self.tauI * (
+                -u_inh + I_XI + I_EI - fb_drive + noise_l + inh_current)
             delta_state_vf.append({"exc": delta_exc, "inh": delta_inh})
 
             # post-synaptic factor (interneuron space).

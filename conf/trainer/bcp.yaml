@@ -37,10 +37,16 @@ gate_by_derivative: False
 use_fr_error: False
 
 # Learned feedback (Q) — only active when feedback_mode starts with 'learned'
-q_lr: 1e-3            # learning rate of the dedicated Q optimizer (Adam, own state)
+q_lr: 1e-3            # LR of the dedicated Q optimizer during joint (FF+Q) training
+q_lr_pretraining: null  # LR of the Q optimizer during FF-frozen pretraining; null -> q_lr
 q_update_every: 1
 q_init_scale: 0.1
 q_seed: 0
 
 # Fixed-step solver for the noisy feedback dynamics
 noisy_solver: euler
+
+# Optional steady assembly-space drive during the separate noisy Q-learning phase.
+# It is projected through M_E/M_I and is invalid for single-phase learning.
+inject_current_during_fb_learning: False
+fb_learning_current: 1.0
