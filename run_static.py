@@ -300,14 +300,13 @@ def main(cfg: DictConfig) -> None:
 
             logger.info(f"Test accuracy: {test_metrics.pop('accuracy'):.1f} %")
 
-        # Learned-feedback metrics: FB-subspace alignment (compliance) + its ceiling,
-        # relative feedback strength (Fig 3C), and the functional FF-update angle.
+        # Learned-feedback metrics
         if str(getattr(trainer, "feedback_mode", "analytic")).startswith(
             "learned"
         ) and hasattr(trainer, "fb_subspace_alignment"):
             metric_batch = next(iter(train_data))
 
-            # FB-subspace alignment: compliance ratio in [0, 1], 1 = projected Q lies in row(J).
+            # FB-subspace alignment
             subalign = [float(c) for c in trainer.fb_subspace_alignment(train_state, metric_batch)]
             subalign_mean = float(sum(subalign) / len(subalign))
             results.setdefault("train_CL_fb_subalign_mean", []).append(subalign_mean)
@@ -316,14 +315,31 @@ def main(cfg: DictConfig) -> None:
             subalign_pl = " ".join(f"L{l}={c:.3f}" for l, c in enumerate(subalign))
             logger.info(f"FB subspace-alignment: mean {subalign_mean:.3f}  [{subalign_pl}]")
 
-            # FB-subspace-alignment ceiling: per-layer upper bound (batch-averaged Jacobian
-            # as stand-in Q). Differs by layer (deep layers < 1) — the target Q can approach.
+            # FB-subspace-alignment ceiling
             if hasattr(trainer, "fb_subspace_alignment_ceiling"):
                 ceil = [float(c) for c in trainer.fb_subspace_alignment_ceiling(train_state, metric_batch)]
                 for l, c in enumerate(ceil):
                     results.setdefault(f"train_CL_fb_subalign_ceil_layer{l}", []).append(c)
                 ceil_pl = " ".join(f"L{l}={c:.3f}" for l, c in enumerate(ceil))
                 logger.info(f"FB subspace-alignment ceiling: [{ceil_pl}]")
+
+                # learned alignment relative to its attainable ceiling.
+                subalign_ratio = [c / ceiling for c, ceiling in zip(subalign, ceil)]
+                subalign_ratio_mean = float(sum(subalign_ratio) / len(subalign_ratio))
+                results.setdefault("train_CL_fb_subalign_ratio_mean", []).append(
+                    subalign_ratio_mean
+                )
+                for l, ratio in enumerate(subalign_ratio):
+                    results.setdefault(
+                        f"train_CL_fb_subalign_ratio_layer{l}", []
+                    ).append(ratio)
+                subalign_ratio_pl = " ".join(
+                    f"L{l}={ratio:.3f}" for l, ratio in enumerate(subalign_ratio)
+                )
+                logger.info(
+                    f"FB subspace-alignment / ceiling: mean {subalign_ratio_mean:.3f}  "
+                    f"[{subalign_ratio_pl}]"
+                )
 
             # Relative feedback strength ||Qu||/||Wr|| (Fig 3C) — informs norm_val.
             fbff = [float(r) for r in trainer.feedback_strength_ratio(train_state, metric_batch)]
