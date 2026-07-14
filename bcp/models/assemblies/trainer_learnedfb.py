@@ -60,11 +60,16 @@ def make_ou_paths(key, ts, sizes, tau_eps, dt):
 
 
 def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use_fr_error,
-                 solver, assembly_current=0.0):
+                 solver, assembly_current=0.0, dt=None):
     """Runs the noisy feedback-learning trajectory (batched).
+
+    `dt` overrides the model timestep only for this noisy solve. Callers that do
+    not provide it retain `model.dt` (notably the combined single-phase FF+Q
+    solve).
     """
     vf = model.vf
-    T, dt = model.T, model.dt
+    T = model.T
+    dt = model.dt if dt is None else dt
     ts = jnp.arange(0, T, dt)
     nb_hidden = vf.nb_hidden
 
@@ -88,14 +93,15 @@ def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use
 
 
 def accumulate_squash_source(model, params, x, y_ref, ol_state, Q, eps_paths,
-                             use_fr_error=True, solver=None, assembly_current=0.0):
+                             use_fr_error=True, solver=None, assembly_current=0.0, dt=None):
     """Controller-squashing feedback source (two-phase or pretrain)"""
     vf = model.vf
-    window = jnp.maximum(model.T - vf.t_settle, model.dt)
+    dt = model.dt if dt is None else dt
+    window = jnp.maximum(model.T - vf.t_settle, dt)
     final = _noisy_solve(model, params, x, y_ref, ol_state, Q, eps_paths,
                          accumulate_ff=False, use_fr_error=use_fr_error,
                          solver=model.solver if solver is None else solver,
-                         assembly_current=assembly_current)
+                         assembly_current=assembly_current, dt=dt)
     sources = [final["Qsrc"][l] / window for l in range(vf.nb_hidden)]
     return [jnp.mean(sources[l], axis=0) for l in range(vf.nb_hidden)]
 
@@ -132,6 +138,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     q_init_scale: float = 0.01         # init scale of the random Q direction
     q_seed: int = 0                    # RNG offset for Q init + noise paths
     noisy_solver: str = "euler"
+    fb_learning_dt: float = 1e-2       # timestep only for separate pretrain/two-phase Q solves
     inject_current_during_fb_learning: bool = False
     fb_learning_current: float = 1.0
 
@@ -217,14 +224,17 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     # ------------------------------------------------------------------ #
     # Noise, Q update, etc
     # ------------------------------------------------------------------ #
-    def _make_eps(self, x, key):
-        """Per-(sample, layer) OU noise paths (assembly space)"""
+    def _make_eps(self, x, key, dt=None):
+        """Per-(sample, layer) OU paths at `dt`; default preserves `model.dt`."""
         vf = self.model.vf
+        dt = self.model.dt if dt is None else dt
+        if dt <= 0:
+            raise ValueError("feedback-learning dt must be positive")
         ensemble_sizes, _, _ = vf._get_hidden_sizes()
-        ts = jnp.arange(0, self.model.T, self.model.dt)
+        ts = jnp.arange(0, self.model.T, dt)
         tau_eps = vf._tau_eps_per_layer()
         keys = jax.random.split(key, x.shape[0])
-        return vmap(lambda k: make_ou_paths(k, ts, ensemble_sizes, tau_eps, self.model.dt))(keys)
+        return vmap(lambda k: make_ou_paths(k, ts, ensemble_sizes, tau_eps, dt))(keys)
 
     def _squash_reference(self, OL_y_pred):
         """makes the controller error vanish at the OL equilibrium, so
@@ -309,12 +319,13 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         y_ref = self._squash_reference(OL_y_pred)
 
         key = jax.random.fold_in(jax.random.PRNGKey(self.q_seed + 7), train_state.step)
-        eps_paths = self._make_eps(x, key)
+        eps_paths = self._make_eps(x, key, dt=self.fb_learning_dt)
         sources = accumulate_squash_source(
             self.model, train_state.params, x, y_ref, OL_state,
             list(train_state.Q), eps_paths, self.use_fr_error,
             solver=self._noisy_solver_instance(),
-            assembly_current=self._assembly_current_for_fb_learning())
+            assembly_current=self._assembly_current_for_fb_learning(),
+            dt=self.fb_learning_dt)
 
         # FF is frozen during pretraining -> no point decaying Q (beta=0).
         # Pretraining always updates Q every step, regardless of q_update_every,
@@ -426,12 +437,13 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         # ---- feedback-learning phase: accumulate source, update Q ----
         y_ref = self._squash_reference(OL_y_pred)
         key = jax.random.fold_in(jax.random.PRNGKey(self.q_seed + 1), train_state.step)
-        eps_paths = self._make_eps(x, key)
+        eps_paths = self._make_eps(x, key, dt=self.fb_learning_dt)
         sources = accumulate_squash_source(
             self.model, train_state.params, x, y_ref, OL_state,
             list(train_state.Q), eps_paths, self.use_fr_error,
             solver=self._noisy_solver_instance(),
-            assembly_current=self._assembly_current_for_fb_learning())
+            assembly_current=self._assembly_current_for_fb_learning(),
+            dt=self.fb_learning_dt)
         train_state = self._update_Q(train_state, sources)
 
         # ---- clean closed-loop with the updated Q -> FF (BCP) gradient ----

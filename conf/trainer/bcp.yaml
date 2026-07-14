@@ -45,6 +45,9 @@ q_seed: 0
 
 # Fixed-step solver for the noisy feedback dynamics
 noisy_solver: euler
+# Timestep used only by the separate noisy Q-learning solve in FF-frozen
+# pretraining and learned-twophase training. All other solves use model.dt.
+fb_learning_dt: 1e-2
 
 # Optional steady assembly-space drive during the separate noisy Q-learning phase.
 # It is projected through M_E/M_I and is invalid for single-phase learning.

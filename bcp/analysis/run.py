@@ -17,7 +17,7 @@ from pathlib import Path
 import os
 from typing import Iterable
 from warnings import WarningMessage
-from numpy.lib.arraysetops import isin
+from numpy import isin
 from omegaconf import OmegaConf
 import json
 

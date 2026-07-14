@@ -20,7 +20,7 @@ EI_ratio: 4.0
 # Dynamics
 fb_to_readout: True
 tauI: 10e-3
-tauE: 20e-3
+tauE: 30e-3
 tauOut: 30e-3
 
 # Initialization
