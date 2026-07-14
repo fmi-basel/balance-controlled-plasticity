@@ -17,6 +17,8 @@ feedback_mode: learned-twophase
 average_fb_weights: False
 clip_fb_weights: False
 clip_val: 1.0
+# Analytic FB is normalized when applied. Learned FB instead normalizes the stored Q
+# at initialization and after each Q update (using the norm of Q @ M_I.T).
 norm_fb_weights: False
 norm_val: 1.0
 clip_params: True
@@ -40,7 +42,7 @@ use_fr_error: False
 q_lr: 1e-3            # LR of the dedicated Q optimizer during joint (FF+Q) training
 q_lr_pretraining: null  # LR of the Q optimizer during FF-frozen pretraining; null -> q_lr
 q_update_every: 1
-q_init_scale: 0.1
+q_init_scale: 0.01      # learned Q scale only when norm_fb_weights=False
 q_seed: 0
 
 # Fixed-step solver for the noisy feedback dynamics

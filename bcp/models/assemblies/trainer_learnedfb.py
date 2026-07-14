@@ -135,7 +135,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     q_lr: float = 0.001                # LR of the dedicated Q optimizer during joint (FF+Q) training
     q_lr_pretraining: float = None     # LR of the Q optimizer during FF-frozen pretraining; None -> q_lr
     q_update_every: int = 1            # refresh Q every N steps
-    q_init_scale: float = 0.01         # init scale of the random Q direction
+    q_init_scale: float = 0.01         # init scale of raw Q; irrelevant when norm_fb_weights=True
     q_seed: int = 0                    # RNG offset for Q init + noise paths
     noisy_solver: str = "euler"
     fb_learning_dt: float = 1e-2       # timestep only for separate pretrain/two-phase Q solves
@@ -191,13 +191,15 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
 
         ensemble_sizes, _, _ = vf._get_hidden_sizes()
         key = jax.random.fold_in(rng, self.q_seed)
+        init_scale = 1.0 if self.norm_fb_weights else self.q_init_scale
         Q = []
         for l in range(vf.nb_hidden):
             key, sub = jax.random.split(key)
             Q.append(
-                self.q_init_scale
+                init_scale
                 * jax.random.normal(sub, (vf.dim_output, ensemble_sizes[l]), dtype=self.model.dtype)
             )
+        Q = self._normalize_learned_Q(params, Q)
         extra["Q"] = Q
         extra["q_opt_state"] = self._q_optimizer().init(Q)
         return extra
@@ -205,21 +207,35 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     # ------------------------------------------------------------------ #
     # Operative feedback weights from the learned Q
     # ------------------------------------------------------------------ #
+    def _normalize_learned_Q(self, params, Q):
+        """Rescale stored ensemble-space Q so its projected inhibitory matrix
+        has Frobenius norm ``norm_val`` in every layer.
+
+        The projection is linear, so scaling Q by the norm of ``Q @ M_I.T``
+        establishes the desired norm without keeping a second feedback-weight
+        representation.  A zero matrix remains zero and finite.
+        """
+        if not self.norm_fb_weights:
+            return list(Q)
+
+        vf = self.model.vf
+        fb_inh = vf.apply(params, list(Q), method=vf.fb_from_Q)
+        return [
+            q * (self.norm_val / (jnp.linalg.norm(w) + 1e-12))
+            for q, w in zip(Q, fb_inh)
+        ]
+
     def _learned_fb_weights(self, train_state, batch):
-        """Project ensemble Q through M_I, broadcast over the batch, normalize
-        each per-sample matrix to `norm_val` (Q magnitude is gauge-free)."""
+        """Project the single stored Q representation and batch-broadcast it.
+
+        When ``norm_fb_weights`` is enabled, Q is normalized in-place at
+        initialization and after each completed Q update. No application-time
+        normalized copy is made.
+        """
         vf = self.model.vf
         fb_inh = vf.apply(train_state.params, list(train_state.Q), method=vf.fb_from_Q)
         bs = batch[0].shape[0]
-
-        def _norm_one(w):  # w: [pre, post]
-            return w / (jnp.linalg.norm(w) + 1e-12) * self.norm_val
-
-        fb = []
-        for w in fb_inh:
-            w = jnp.broadcast_to(w, (bs,) + w.shape)
-            fb.append(jax.vmap(_norm_one)(w))
-        return fb
+        return [jnp.broadcast_to(w, (bs,) + w.shape) for w in fb_inh]
 
     # ------------------------------------------------------------------ #
     # Noise, Q update, etc
@@ -403,21 +419,25 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
 
         `beta` overrides the Q-leak term (defaults to `vf.beta`); pretraining
         passes `beta=0.0` so the Q matrix does not decay while FF is frozen.
+        When ``norm_fb_weights`` is enabled, beta is disabled and the completed
+        update is projected back to the fixed per-layer inhibitory-space norm.
         `force_update=True` bypasses the `q_update_every` gate so Q is refreshed
         on every call (used during pretraining). `pretraining=True` selects the
         pretraining Q learning rate (`q_lr_pretraining`).
         """
         if beta is None:
             beta = self.model.vf.beta
+        effective_beta = 0.0 if self.norm_fb_weights else beta
         q_tx = self._q_optimizer(pretraining=pretraining)
 
         def do_step():
-            gQ = self._q_grads(train_state.Q, sources, beta)
+            gQ = self._q_grads(train_state.Q, sources, effective_beta)
             gQ = self._norm_clip_grads(gQ)   # honor norm_grads / clip_grads for Q too
             updates, new_opt_state = q_tx.update(
                 gQ, train_state.q_opt_state, train_state.Q)
             new_Q = optax.apply_updates(train_state.Q, updates)
-            return list(new_Q), new_opt_state
+            new_Q = self._normalize_learned_Q(train_state.params, new_Q)
+            return new_Q, new_opt_state
 
         do_update = force_update or ((train_state.step % self.q_update_every) == 0)
         new_Q, new_opt_state = jax.lax.cond(

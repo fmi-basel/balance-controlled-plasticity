@@ -26,7 +26,7 @@ class LearnedFeedbackAssemblyVectorField(ExcInhAssemblyVectorField):
     tau_filt_ctrl: Any = None      # low-pass -> control trace c_lp; teach = ctrl - c_lp
     tau_filt_post: float = 0.02    # low-pass -> inhibitory membrane trace u_inh_lp
 
-    beta: float = 0.01                # Q leak, folded into the Q gradient (small, weight-decay-like)
+    beta: float = 0.01                # Q leak for raw Q (trainer disables it for fixed-norm learned Q)
     signal_source: str = "membrane"   # 'membrane' = low-pass(u_inh) | 'compartment' = Qu+σε 
     update_sign: float = 1.0          # sign of the anti-Hebbian source
     t_settle: float = 0.0             # gate source accumulation to t > t_settle
