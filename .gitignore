@@ -148,3 +148,6 @@ pyproject.toml
 .mplconfig/
 .claude/
 uv.lock
+
+# learned-FB hyperparameter sweep outputs
+sweep_results/
