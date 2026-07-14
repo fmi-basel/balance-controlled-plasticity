@@ -212,18 +212,55 @@ def main(cfg: DictConfig) -> None:
             f"Pre-training feedback weights (Q) for {epochs_pretrain_fb} epochs [FF frozen]..."
         )
         for pre_epoch in range(1, epochs_pretrain_fb + 1):
-            train_state, pre_metrics = trainer.pretrain_epoch(
+            train_state, _ = trainer.pretrain_epoch(
                 train_state, train_data, cfg.batchsize
             )
-            subalign = " ".join(
-                f"L{l}={float(pre_metrics[f'fb_subalign_layer{l}']):.3f}"
-                for l in range(model.vf.nb_hidden)
+            metric_batch = next(iter(train_data))
+            subalign = [
+                float(c)
+                for c in trainer.fb_subspace_alignment(train_state, metric_batch)
+            ]
+            subalign_mean = float(sum(subalign) / len(subalign))
+            subalign_pl = " ".join(
+                f"L{l}={c:.3f}" for l, c in enumerate(subalign)
             )
             logger.info(
                 f"  [Q pretrain] epoch {pre_epoch}/{epochs_pretrain_fb}  "
-                f"FB subspace-alignment {subalign}"
+                f"FB subspace-alignment: mean {subalign_mean:.3f}  [{subalign_pl}]"
             )
+
+            if hasattr(trainer, "fb_subspace_alignment_ceiling"):
+                ceil = [
+                    float(c)
+                    for c in trainer.fb_subspace_alignment_ceiling(
+                        train_state, metric_batch
+                    )
+                ]
+                ceil_pl = " ".join(
+                    f"L{l}={c:.3f}" for l, c in enumerate(ceil)
+                )
+                logger.info(
+                    f"  [Q pretrain] FB subspace-alignment ceiling: [{ceil_pl}]"
+                )
+
+                subalign_ratio = [
+                    c / ceiling for c, ceiling in zip(subalign, ceil)
+                ]
+                subalign_ratio_mean = float(
+                    sum(subalign_ratio) / len(subalign_ratio)
+                )
+                subalign_ratio_pl = " ".join(
+                    f"L{l}={ratio:.3f}"
+                    for l, ratio in enumerate(subalign_ratio)
+                )
+                logger.info(
+                    "  [Q pretrain] FB subspace-alignment / ceiling: "
+                    f"mean {subalign_ratio_mean:.3f}  [{subalign_ratio_pl}]"
+                )
         tracker.update(train_state)
+        
+        # Reset optimizer state after pretraining
+        train_state = trainer.reset_optimizers(train_state)
 
     logger.info("Starting training...")
     for epoch in range(1, cfg.epochs + 1):
