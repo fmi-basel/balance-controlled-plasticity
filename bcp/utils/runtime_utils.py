@@ -7,6 +7,22 @@ logging.basicConfig()
 logger = logging.getLogger("incontrol.utils")
 
 
+def derive_seeds(seed):
+    """
+    Splits one root seed into many seeds
+    """
+    root = jax.random.PRNGKey(int(seed))
+    k_teacher, k_data, k_vf, k_q, k_init, _ = jax.random.split(root, 6)
+    isd = lambda k: int(jax.random.randint(k, (), 0, 2**31 - 1))
+    return dict(
+        teacher=isd(k_teacher),
+        data=isd(k_data),
+        vf=isd(k_vf),
+        q=isd(k_q),
+        init_key=k_init,
+    )
+
+
 def select_device(device, gpu_id) -> None:
     """
     Selects device to run on.

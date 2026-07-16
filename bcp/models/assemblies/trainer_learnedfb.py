@@ -205,15 +205,10 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         return extra
 
     # ------------------------------------------------------------------ #
-    # Operative feedback weights from the learned Q
+    # Feedback weights from the learned Q
     # ------------------------------------------------------------------ #
     def _normalize_learned_Q(self, params, Q):
-        """Rescale stored ensemble-space Q so its projected inhibitory matrix
-        has Frobenius norm ``norm_val`` in every layer.
-
-        The projection is linear, so scaling Q by the norm of ``Q @ M_I.T``
-        establishes the desired norm without keeping a second feedback-weight
-        representation.  A zero matrix remains zero and finite.
+        """Rescale Q so its projection has Frobenius norm ``norm_val`` in every layer.
         """
         if not self.norm_fb_weights:
             return list(Q)
@@ -226,16 +221,30 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         ]
 
     def _learned_fb_weights(self, train_state, batch):
-        """Project the single stored Q representation and batch-broadcast it.
-
-        When ``norm_fb_weights`` is enabled, Q is normalized in-place at
-        initialization and after each completed Q update. No application-time
-        normalized copy is made.
+        """Project Q and batch-broadcast
         """
         vf = self.model.vf
         fb_inh = vf.apply(train_state.params, list(train_state.Q), method=vf.fb_from_Q)
         bs = batch[0].shape[0]
         return [jnp.broadcast_to(w, (bs,) + w.shape) for w in fb_inh]
+
+    def _applied_fb_weights(self, train_state, batch):
+        """broadcast and modify feedback before applying
+        """
+        is_learned, _ = self._parse_mode(self.feedback_mode)
+        if is_learned:
+            if train_state.Q is None:
+                raise ValueError("learned feedback metrics require train_state.Q")
+            return self._learned_fb_weights(train_state, batch)
+        if str(self.feedback_mode) == "random":
+            if train_state.random_fb is None:
+                raise ValueError("random feedback metrics require train_state.random_fb")
+            bs = batch[0].shape[0]
+            fb = [jnp.broadcast_to(w, (bs,) + w.shape) for w in train_state.random_fb]
+            return self.modify_fb_weights(fb, batch)
+        raise ValueError(
+            "only learned* or random feedback can be scored against the analytic reference"
+        )
 
     # ------------------------------------------------------------------ #
     # Noise, Q update, etc
@@ -263,11 +272,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         return OL_y_pred
 
     def _q_optimizer(self, pretraining=False):
-        """Dedicated optax optimizer for the feedback weights Q (own LR + own state).
-
-        FF-frozen pretraining uses `q_lr_pretraining` when set; joint training (and
-        anything else) uses `q_lr`. Adam's state layout is independent of the learning
-        rate, so a state initialized with either LR is interchangeable between phases.
+        """Dedicated optax optimizer for the feedback weights
         """
         lr = self.q_lr
         if pretraining and self.q_lr_pretraining is not None:
@@ -287,13 +292,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     # ------------------------------------------------------------------ #
     def reset_q_optimizer(self, train_state):
         """
-        Reset the dedicated feedback-weight (Q) optimizer state.
-
-        Re-initializes the Q optimizer state from the current Q, clearing any
-        accumulated statistics (e.g. Adam moments). The feedback weights Q
-        themselves and the trainer are left unchanged.
-
-        Returns a new train_state with a fresh Q optimizer state.
+        Reset Q optimizer state.
         """
         if train_state.Q is None:
             raise ValueError(
@@ -306,14 +305,11 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     def reset_optimizers(self, train_state):
         """
         Reset both the forward-weight and feedback-weight (Q) optimizers.
-
-        Convenience wrapper around `reset_optimizer` (forward weights) and
-        `reset_q_optimizer` (feedback weights Q).
         """
         return self.reset_q_optimizer(self.reset_optimizer(train_state))
 
     def _q_grads(self, Q, sources, beta):
-        """Hand-built Q gradient (`beta` is the Q-leak/decay term).
+        """Q gradient
         """
         vf = self.model.vf
         s_l = vf.layer_scaling()
@@ -327,8 +323,6 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     # ------------------------------------------------------------------ #
     @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
     def pretrain_step(self, train_state, batch, u0):
-        """One Q update from the controller-squashing source. FF weights
-        (params) are untouched; only Q / q_opt_state / step change."""
         x = batch[0]
         vf = self.model.vf
         OL_y_pred, OL_state, _ = self.model.openloop(train_state.params, u0, x)
@@ -343,14 +337,12 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             assembly_current=self._assembly_current_for_fb_learning(),
             dt=self.fb_learning_dt)
 
-        # FF is frozen during pretraining -> no point decaying Q (beta=0).
-        # Pretraining always updates Q every step, regardless of q_update_every,
-        # and uses the pretraining Q learning rate (q_lr_pretraining).
+
         train_state = self._update_Q(train_state, sources, beta=0.0, force_update=True,
                                      pretraining=True)
         train_state = train_state.replace(step=train_state.step + 1)
 
-        # Metrics for the UPDATED Q (params/OL_state unchanged — FF is frozen).
+        # Metrics
         subalign = self._fb_subspace_alignment_from_ol(
             train_state.Q, train_state.params, OL_state)
         metrics = {}
@@ -358,7 +350,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             metrics[f"fb_subalign_layer{l}"] = subalign[l]
         return train_state, metrics
 
-    def pretrain_epoch(self, train_state, train_data, batchsize, max_batches=None, **kwargs):
+    def pretrain_epoch(self, train_state, train_data, batchsize, max_batches=None,
+                       monitor=None, **kwargs):
         """One FF-frozen Q pre-training epoch over the training data."""
         total_batches = len(train_data)
         train_data = iter(train_data)
@@ -371,16 +364,20 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             if max_batches is not None and i >= max_batches:
                 break
             train_state, bm = self.pretrain_step(train_state, batch, u0)
+            if monitor is not None:
+                monitor.record_batch(train_state, None, bm)
             if metrics is None:
                 metrics = {k: [] for k in bm}
             for k, v in bm.items():
                 metrics[k].append(v)
 
         metrics = {k: jnp.mean(jnp.stack(v)) for k, v in metrics.items()}
+        if monitor is not None:
+            monitor.record_epoch()
         return train_state, metrics
 
     # ------------------------------------------------------------------ #
-    # Train step (dispatch on feedback_mode; plain Python dispatcher)
+    # Train step
     # ------------------------------------------------------------------ #
     def train_step(self, train_state, batch, u0):
         is_learned, rule = self._parse_mode(self.feedback_mode)
@@ -414,38 +411,37 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             train_state = train_state.replace(params=new_params)
         return train_state
 
-    def _update_Q(self, train_state, sources, beta=None, force_update=False, pretraining=False):
-        """Apply one Q-optimizer step every `q_update_every` steps.
-
-        `beta` overrides the Q-leak term (defaults to `vf.beta`); pretraining
-        passes `beta=0.0` so the Q matrix does not decay while FF is frozen.
-        When ``norm_fb_weights`` is enabled, beta is disabled and the completed
-        update is projected back to the fixed per-layer inhibitory-space norm.
-        `force_update=True` bypasses the `q_update_every` gate so Q is refreshed
-        on every call (used during pretraining). `pretraining=True` selects the
-        pretraining Q learning rate (`q_lr_pretraining`).
+    def _apply_Q_update(self, train_state, sources, beta=None, pretraining=False):
+        """Apply one unconditional Q-optimizer step.
         """
         if beta is None:
             beta = self.model.vf.beta
         effective_beta = 0.0 if self.norm_fb_weights else beta
         q_tx = self._q_optimizer(pretraining=pretraining)
 
-        def do_step():
-            gQ = self._q_grads(train_state.Q, sources, effective_beta)
-            gQ = self._norm_clip_grads(gQ)   # honor norm_grads / clip_grads for Q too
-            updates, new_opt_state = q_tx.update(
-                gQ, train_state.q_opt_state, train_state.Q)
-            new_Q = optax.apply_updates(train_state.Q, updates)
-            new_Q = self._normalize_learned_Q(train_state.params, new_Q)
-            return new_Q, new_opt_state
-
-        do_update = force_update or ((train_state.step % self.q_update_every) == 0)
-        new_Q, new_opt_state = jax.lax.cond(
-            do_update,
-            do_step,
-            lambda: (list(train_state.Q), train_state.q_opt_state),
-        )
+        gQ = self._q_grads(train_state.Q, sources, effective_beta)
+        gQ = self._norm_clip_grads(gQ)   # honor norm_grads / clip_grads for Q too
+        updates, new_opt_state = q_tx.update(
+            gQ, train_state.q_opt_state, train_state.Q)
+        new_Q = optax.apply_updates(train_state.Q, updates)
+        new_Q = self._normalize_learned_Q(train_state.params, new_Q)
         return train_state.replace(Q=new_Q, q_opt_state=new_opt_state)
+
+    def _update_Q(self, train_state, sources, beta=None, force_update=False, pretraining=False):
+        """Apply one Q-optimizer step every `q_update_every` steps.
+        """
+        if force_update or self.q_update_every == 1:
+            return self._apply_Q_update(
+                train_state, sources, beta=beta, pretraining=pretraining)
+
+        do_update = (train_state.step % self.q_update_every) == 0
+        return jax.lax.cond(
+            do_update,
+            lambda ts: self._apply_Q_update(
+                ts, sources, beta=beta, pretraining=pretraining),
+            lambda ts: ts,
+            train_state,
+        )
 
     @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
     def _train_step_two_phase(self, train_state, batch, u0):
@@ -456,15 +452,27 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
 
         # ---- feedback-learning phase: accumulate source, update Q ----
         y_ref = self._squash_reference(OL_y_pred)
-        key = jax.random.fold_in(jax.random.PRNGKey(self.q_seed + 1), train_state.step)
-        eps_paths = self._make_eps(x, key, dt=self.fb_learning_dt)
-        sources = accumulate_squash_source(
-            self.model, train_state.params, x, y_ref, OL_state,
-            list(train_state.Q), eps_paths, self.use_fr_error,
-            solver=self._noisy_solver_instance(),
-            assembly_current=self._assembly_current_for_fb_learning(),
-            dt=self.fb_learning_dt)
-        train_state = self._update_Q(train_state, sources)
+
+        def learn_Q(ts):
+            key = jax.random.fold_in(jax.random.PRNGKey(self.q_seed + 1), ts.step)
+            eps_paths = self._make_eps(x, key, dt=self.fb_learning_dt)
+            sources = accumulate_squash_source(
+                self.model, ts.params, x, y_ref, OL_state,
+                list(ts.Q), eps_paths, self.use_fr_error,
+                solver=self._noisy_solver_instance(),
+                assembly_current=self._assembly_current_for_fb_learning(),
+                dt=self.fb_learning_dt)
+            return self._apply_Q_update(ts, sources)
+
+        # Static fast path preserves the q_update_every=1 operation order. For
+        # sparse updates, gate the entire noisy solve rather than discarding a
+        # source that will never be applied.
+        if self.q_update_every == 1:
+            train_state = learn_Q(train_state)
+        else:
+            do_update = (train_state.step % self.q_update_every) == 0
+            train_state = jax.lax.cond(
+                do_update, learn_Q, lambda ts: ts, train_state)
 
         # ---- clean closed-loop with the updated Q -> FF (BCP) gradient ----
         fb_weights = self._learned_fb_weights(train_state, batch)
@@ -526,27 +534,16 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     @staticmethod
     def _fb_subspace_alignment_ratio(Q_l, J_l, ridge=1e-6):
         """FB-subspace alignment: fraction of ||Q_l||_F lying in row(J_l).
-
-        Both `Q_l` and `J_l` live in inhibitory-population space
-        ([dim_output, sizes_inh]): `Q_l` is the learned feedback projected through
-        M_I, `J_l` is `vf.calculate_jacobian`. Returns a value in [0, 1]; 1 means the
-        (row) space of the projected feedback lies entirely inside row(J).
         """
         m = J_l.shape[0]
         gram = J_l @ J_l.T + ridge * jnp.eye(m, dtype=J_l.dtype)
         P = J_l.T @ jnp.linalg.solve(gram, J_l)          # [sizes_inh, sizes_inh]
         return jnp.linalg.norm(Q_l @ P) / (jnp.linalg.norm(Q_l) + 1e-12)
 
-    def _fb_subspace_alignment_from_ol(self, Q, params, ol_state):
-        """Per-layer FB-subspace alignment from an existing (batched) open-loop state.
-
-        Compares the learned feedback PROJECTED into inhibitory-population space
-        (`fb_from_Q`, [dim_output, sizes_inh]) against the PER-SAMPLE inhibitory-space
-        Jacobian (`calculate_jacobian`), averaging the ratio over the batch. This is the
-        fair comparison: both operands are the connectivity the network actually uses.
+    def _fb_subspace_alignment_from_projected(self, fb_inh, params, ol_state):
+        """alignment of projected Q at an open-loop state.
         """
         vf = self.model.vf
-        Q_proj = vf.apply(params, list(Q), method=vf.fb_from_Q)  # list [dim_output, sizes_inh]
 
         def _per_sample(vf_state):
             return vf.apply(params, vf_state, method=vf.calculate_jacobian)
@@ -554,25 +551,45 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         J = jax.vmap(_per_sample)(ol_state["vf"])  # list per layer [batch, dout, sizes_inh]
         out = []
         for l in range(vf.nb_hidden):
-            Q_l = Q_proj[l]
-            ratios = jax.vmap(lambda Jb: self._fb_subspace_alignment_ratio(Q_l, Jb))(J[l])
+            fb_l = fb_inh[l]
+            ratios = jax.vmap(lambda Jb: self._fb_subspace_alignment_ratio(fb_l, Jb))(J[l])
             out.append(jnp.mean(ratios))
         return out
 
+    def _fb_subspace_alignment_from_ol(self, Q, params, ol_state):
+        """Backward-compatible learned-Q alignment helper."""
+        vf = self.model.vf
+        fb_inh = vf.apply(params, list(Q), method=vf.fb_from_Q)
+        return self._fb_subspace_alignment_from_projected(fb_inh, params, ol_state)
+
     @partial(jax.jit, static_argnums=(0,))
     def fb_subspace_alignment(self, train_state, batch):
-        """Per-layer FB-subspace alignment: how much of the projected learned feedback
-        lies in the row space of the inhibitory-space Jacobian (in [0, 1])."""
+        """Alignment of learned or fixed-random feedback with Jacobian row spaces."""
         vf = self.model.vf
         u0 = vf.get_initial_state_batchexp(batch[0])
         _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])
-        return self._fb_subspace_alignment_from_ol(train_state.Q, train_state.params, OL_state)
+
+        is_learned, _ = self._parse_mode(self.feedback_mode)
+        if is_learned:
+            if train_state.Q is None:
+                raise ValueError("learned feedback alignment requires train_state.Q")
+            fb_inh = vf.apply(
+                train_state.params, list(train_state.Q), method=vf.fb_from_Q)
+        elif str(self.feedback_mode) == "random":
+            if train_state.random_fb is None:
+                raise ValueError("random feedback alignment requires train_state.random_fb")
+            fb_inh = list(train_state.random_fb)
+        else:
+            raise ValueError(
+                "fb_subspace_alignment supports only learned* or random feedback modes"
+            )
+
+        return self._fb_subspace_alignment_from_projected(
+            fb_inh, train_state.params, OL_state)
 
     @partial(jax.jit, static_argnums=(0,))
     def fb_subspace_alignment_ceiling(self, train_state, batch):
-        """Per-layer upper bound on the achievable FB-subspace alignment: the batch-mean
-        inhibitory-space Jacobian used as a stand-in for the projected feedback, scored
-        against each per-sample Jacobian."""
+        """Per-layer upper bound on the achievable FB-subspace alignment"""
         vf = self.model.vf
         u0 = vf.get_initial_state_batchexp(batch[0])
         _, OL_state, _ = self.model.openloop(train_state.params, u0, batch[0])
@@ -598,15 +615,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
 
     @partial(jax.jit, static_argnums=(0,))
     def ff_update_alignment(self, train_state, batch):
-        """Per-block angle (deg) between the FF grads the ACTIVE FB-learning method
-        applies and the FF grads the analytic Jacobian feedback would apply.
-
-        The learned side is *exactly* what the current method applies on that batch:
-        two-phase -> clean closed-loop with the learned feedback; single-phase -> the
-        noisy closed-loop solve with in-ODE FF-grad accumulation. Both the learned and
-        the analytic reference start from the open-loop steady state, as the real train
-        steps do. Grads are compared raw (before norm/clip). Returns a list of length
-        nb_hidden+1: hidden layers first, then the readout.
+        """angle (deg) between the FF grads with learned Q (or random) and the FF grads the analytic Jacobian feedback would apply.
         """
         x, y = batch[0], batch[1]
         vf = self.model.vf
@@ -623,9 +632,11 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             train_state, x, y, OL_y_pred, CL_ya, OL_state, CL_state_a)
 
         # learned side: exactly the FF grads the active method applies (dispatch on rule)
-        _, rule = self._parse_mode(self.feedback_mode)  # static -> resolved at trace time
-        if rule == "two_phase":
-            fb_l = self._learned_fb_weights(train_state, batch)
+        is_learned, rule = self._parse_mode(self.feedback_mode)  # static -> resolved at trace time
+        if rule == "two_phase" or not is_learned:
+            # two-phase and fixed-random both drive a clean closed loop with a shared
+            # feedback matrix; only the source of that matrix differs.
+            fb_l = self._applied_fb_weights(train_state, batch)
             CL_yl, CL_state_l, _ = self.model.closedloop(
                 train_state.params, OL_state, x, y_targets, fb_l)
             grads_l = self.get_gradients(
@@ -644,16 +655,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
 
     @partial(jax.jit, static_argnums=(0,))
     def ff_update_alignment_floor(self, train_state, batch):
-        """Per-block lower bound (deg) on the achievable FF-update angle.
-
-        Analog of `fb_subspace_alignment_ceiling` for the FF-update metric: the learned
-        feedback is a *single shared* matrix (broadcast over the batch), while the analytic
-        reference is per-sample. The best any shared feedback can do is the batch-averaged
-        Jacobian; here we run the clean closed loop with that batch-mean feedback and measure
-        the angle of the resulting FF grads against the per-sample analytic reference. This is
-        a floor: no shared feedback (including the learned Q) can beat this angle, and it is
-        layer-dependent (small where per-sample Jacobians agree, larger where they scatter).
-        Returns a list of length nb_hidden+1: hidden layers first, then the readout.
+        """lower bound (deg) on the achievable FF-update angle.
         """
         x, y = batch[0], batch[1]
         vf = self.model.vf
@@ -694,7 +696,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         u0 = vf.get_initial_state_batchexp(x)
         OL_y_pred, OL_state, _ = self.model.openloop(train_state.params, u0, x)
         y_targets = self.calculate_targets(OL_y_pred, y)
-        fb_weights = self._learned_fb_weights(train_state, batch)   # list, each [bs, dout, sizes_inh]
+        fb_weights = self._applied_fb_weights(train_state, batch)   # list, each [bs, dout, sizes_inh]
         CL_y_pred, CL_state, _ = self.model.closedloop(
             train_state.params, OL_state, x, y_targets, fb_weights)
 

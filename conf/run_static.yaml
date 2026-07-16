@@ -11,6 +11,7 @@ out_dir : out/static  # Directory to save model and log files.
 
 # RNG
 seed: False  # Random seed. If False, use random seed
+derive_seeds: False  # If True, derive the teacher/data/vf/Q seeds from `seed` (used for learned Q sims)
 
 # Performance
 device : 'gpu'  # 'cpu' or 'gpu'

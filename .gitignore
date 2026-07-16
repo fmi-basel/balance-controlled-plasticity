@@ -151,3 +151,5 @@ uv.lock
 
 # learned-FB hyperparameter sweep outputs
 sweep_results/
+sweep_results_fmnist/
+sweep_results_fmnist_long_horizon_clipped/
