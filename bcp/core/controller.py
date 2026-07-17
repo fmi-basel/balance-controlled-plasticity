@@ -70,13 +70,7 @@ class LeakyPIController(Controller):
         tau_override=None,
         leak_override=None,
     ):
-        """Evaluate the controller, optionally with traced runtime constants.
 
-        The overrides are primarily used by the learned-feedback gradient probe: Flax
-        module fields are static JIT arguments, so rebuilding the controller for every
-        candidate would trigger an XLA compilation.  Normal model calls provide no
-        overrides and therefore retain the exact historical behaviour.
-        """
         
         error = self.loss.get_error(y_pred, y_target)
 

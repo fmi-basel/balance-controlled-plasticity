@@ -35,37 +35,37 @@ logger = logging.getLogger(__name__)
 # Per-assembly OU noise + noisy-trajectory integrators
 # --------------------------------------------------------------------------- #
 def make_ou_paths(key, ts, sizes, tau_eps, dt):
-    """Unit-variance Ornstein-Uhlenbeck processes, one per assembly and layer.
-
-    `sizes` is the per-layer number of ENSEMBLES (noise is per-assembly; it is
-    projected to the interneurons through M_I inside `noisy_step`).
+    """Ornstein-Uhlenbeck processes, one per assembly and layer.
+    Integrates the linear SDE,
+        eps[m+1] = eps[m] e^(-dt/tau) + N(0, var (1 - e^(-2 dt/tau))),   var = 1/(2 tau)
     """
     n = len(ts)
     tau_list = list(tau_eps)
     assert len(tau_list) == len(sizes), "tau_eps length must match number of layers"
     paths = []
     for s, tau_l in zip(sizes, tau_list):
-        a = dt / tau_l
-        amp = jnp.sqrt(2.0 * dt / tau_l)
-        key, sub = jax.random.split(key)
+        decay = jnp.exp(-dt / tau_l)
+        std = jnp.sqrt((1.0 - decay ** 2) / (2.0 * tau_l))
+        key, sub, sub0 = jax.random.split(key, 3)
         noise = jax.random.normal(sub, (n, s))
+        eps0 = jax.random.normal(sub0, (s,)) / jnp.sqrt(2.0 * tau_l)
 
         def step(eps_prev, xi):
-            eps = eps_prev + a * (-eps_prev) + amp * xi
+            eps = decay * eps_prev + std * xi
             return eps, eps
 
-        _, path = jax.lax.scan(step, jnp.zeros(s), noise)
+        _, path = jax.lax.scan(step, eps0, noise)
         paths.append(path)
     return paths
 
 
 def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use_fr_error,
-                 solver, assembly_current=0.0, dt=None):
+                 solver, assembly_current=0.0, dt=None, sigma=None, tau_filt=None,
+                 controller_overrides=None):
     """Runs the noisy feedback-learning trajectory (batched).
 
-    `dt` overrides the model timestep only for this noisy solve. Callers that do
-    not provide it retain `model.dt` (notably the combined single-phase FF+Q
-    solve).
+    `dt` overrides the model timestep only for this noisy solve.
+    `sigma` / `tau_filt` override the VF params (only used by optimization of hyperparameters)
     """
     vf = model.vf
     T = model.T
@@ -75,12 +75,14 @@ def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use
 
     def single(xi, yi, ol_i, eps_i):
         interps = [LinearInterpolation(ts=ts, ys=eps_i[l]) for l in range(nb_hidden)]
-        s0 = vf.augmented_initial_state(xi, ol_i, accumulate_ff)
+        # bound call: the filter initialisation reads M_E and the controller
+        s0 = vf.apply(params, xi, yi, ol_i, accumulate_ff, controller_overrides,
+                      method=vf.augmented_initial_state)
 
         def f(t, st, args):
             eps_t = [interps[l].evaluate(t) for l in range(nb_hidden)]
             return vf.apply(params, st, t, xi, yi, Q, eps_t, accumulate_ff, use_fr_error,
-                            assembly_current,
+                            assembly_current, sigma, tau_filt, controller_overrides,
                             method=vf.noisy_step)
 
         sol = diffeqsolve(
@@ -93,21 +95,25 @@ def _noisy_solve(model, params, x, y, ol_state, Q, eps_paths, accumulate_ff, use
 
 
 def accumulate_squash_source(model, params, x, y_ref, ol_state, Q, eps_paths,
-                             use_fr_error=True, solver=None, assembly_current=0.0, dt=None):
-    """Controller-squashing feedback source (two-phase or pretrain)"""
+                             solver=None, assembly_current=0.0, dt=None,
+                             sigma=None, tau_filt=None, controller_overrides=None):
+    """Controller-squashing feedback source (two-phase or pretrain).
+    """
     vf = model.vf
     dt = model.dt if dt is None else dt
     window = jnp.maximum(model.T - vf.t_settle, dt)
     final = _noisy_solve(model, params, x, y_ref, ol_state, Q, eps_paths,
-                         accumulate_ff=False, use_fr_error=use_fr_error,
+                         accumulate_ff=False, use_fr_error=True,
                          solver=model.solver if solver is None else solver,
-                         assembly_current=assembly_current, dt=dt)
-    sources = [final["Qsrc"][l] / window for l in range(vf.nb_hidden)]
-    return [jnp.mean(sources[l], axis=0) for l in range(vf.nb_hidden)]
+                         assembly_current=assembly_current, dt=dt,
+                         sigma=sigma, tau_filt=tau_filt,
+                         controller_overrides=controller_overrides)
+    return [jnp.mean(final["Qsrc"][l] / window, axis=0) for l in range(vf.nb_hidden)]
 
 
 def accumulate_single_phase(model, params, x, y, ol_state, Q, eps_paths,
-                            use_fr_error=True, solver=None):
+                            use_fr_error=True, solver=None,
+                            sigma=None, tau_filt=None, controller_overrides=None):
     """Single learning phase noisy closed-loop with task target: returns both assembly-space
     feedback source and BCP feedforward gradient"""
     vf = model.vf
@@ -115,7 +121,9 @@ def accumulate_single_phase(model, params, x, y, ol_state, Q, eps_paths,
     window = jnp.maximum(model.T - vf.t_settle, model.dt)
     final = _noisy_solve(model, params, x, y, ol_state, Q, eps_paths,
                          accumulate_ff=True, use_fr_error=use_fr_error,
-                         solver=model.solver if solver is None else solver)
+                         solver=model.solver if solver is None else solver,
+                         sigma=sigma, tau_filt=tau_filt,
+                         controller_overrides=controller_overrides)
 
     sources = [jnp.mean(final["Qsrc"][l] / window, axis=0) for l in range(nb_hidden)]
 
@@ -249,15 +257,16 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     # ------------------------------------------------------------------ #
     # Noise, Q update, etc
     # ------------------------------------------------------------------ #
-    def _make_eps(self, x, key, dt=None):
-        """Per-(sample, layer) OU paths at `dt`; default preserves `model.dt`."""
+    def _make_eps(self, x, key, dt=None, tau_eps=None):
+        """Per-(sample, layer) OU paths at `dt`; default preserves `model.dt`.
+        """
         vf = self.model.vf
         dt = self.model.dt if dt is None else dt
         if dt <= 0:
             raise ValueError("feedback-learning dt must be positive")
         ensemble_sizes, _, _ = vf._get_hidden_sizes()
         ts = jnp.arange(0, self.model.T, dt)
-        tau_eps = vf._tau_eps_per_layer()
+        tau_eps = vf._tau_eps_per_layer(tau_eps)
         keys = jax.random.split(key, x.shape[0])
         return vmap(lambda k: make_ou_paths(k, ts, ensemble_sizes, tau_eps, dt))(keys)
 
@@ -308,13 +317,25 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         """
         return self.reset_q_optimizer(self.reset_optimizer(train_state))
 
+    def _resolve_beta(self, beta=None):
+        if beta is None:
+            beta = self.model.vf.beta
+        if self.norm_fb_weights:
+            if beta:
+                logger.warning(
+                    "vf.beta=%g is ignored: norm_fb_weights=True renormalises Q after "
+                    "every update, which discards the Q leak. Set beta=0 to silence, or "
+                    "norm_fb_weights=False to use it.", beta)
+            return 0.0
+        return beta
+
     def _q_grads(self, Q, sources, beta):
-        """Q gradient
+        """Q gradient (descent), i.e. -dQ
         """
         vf = self.model.vf
         s_l = vf.layer_scaling()
         return [
-            s_l[l] * (-vf.update_sign * sources[l] + beta * Q[l])
+            s_l[l] * (-sources[l] + beta * Q[l])
             for l in range(vf.nb_hidden)
         ]
 
@@ -332,7 +353,7 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         eps_paths = self._make_eps(x, key, dt=self.fb_learning_dt)
         sources = accumulate_squash_source(
             self.model, train_state.params, x, y_ref, OL_state,
-            list(train_state.Q), eps_paths, self.use_fr_error,
+            list(train_state.Q), eps_paths,
             solver=self._noisy_solver_instance(),
             assembly_current=self._assembly_current_for_fb_learning(),
             dt=self.fb_learning_dt)
@@ -343,8 +364,9 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
         train_state = train_state.replace(step=train_state.step + 1)
 
         # Metrics
-        subalign = self._fb_subspace_alignment_from_ol(
-            train_state.Q, train_state.params, OL_state)
+        fb_inh = vf.apply(train_state.params, list(train_state.Q), method=vf.fb_from_Q)
+        subalign = self._fb_subspace_alignment_from_projected(
+            fb_inh, train_state.params, OL_state)
         metrics = {}
         for l in range(vf.nb_hidden):
             metrics[f"fb_subalign_layer{l}"] = subalign[l]
@@ -411,15 +433,77 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             train_state = train_state.replace(params=new_params)
         return train_state
 
+    def _clean_ff_phase(self, train_state, batch, OL_y_pred, OL_state, OL_vf_sol):
+        """Apply the clean FF half of two-phase learning with the current Q.
+        """
+        x, y = batch[0], batch[1]
+        fb_weights = self._learned_fb_weights(train_state, batch)
+        y_targets = self.calculate_targets(OL_y_pred, y)
+        CL_y_pred, CL_state, CL_vf_sol = self.model.closedloop(
+            train_state.params, OL_state, x, y_targets, fb_weights)
+
+        metrics = self.calc_metrics(CL_y_pred, y, train_state, CL_vf_sol)
+        train_state = train_state.replace(
+            **self.update_trainstate_params(train_state, OL_vf_sol, x))
+        grads = self.get_gradients(
+            train_state, x, y, OL_y_pred, CL_y_pred, OL_state, CL_state)
+        train_state = self._apply_ff_grads(train_state, grads)
+        return train_state, CL_vf_sol, metrics
+
+    def _shared_q_oracle_from_ol_state(self, params, OL_state, ridge_rel=1e-6):
+        """Normalized representable batch-mean analytic Jacobian in Q coordinates."""
+        vf = self.model.vf
+        jacobians = jax.vmap(
+            lambda state: vf.apply(params, state, method=vf.calculate_jacobian)
+        )(OL_state["vf"])
+        memberships = params["constants"]["memberships"]["M_I"]
+        oracle_Q = []
+        for J, membership in zip(jacobians, memberships):
+            M = membership.astype(J.dtype)
+            jbar = jnp.mean(J, axis=0)
+            gram = M.T @ M
+            scale = jnp.trace(gram) / gram.shape[0]
+            ridge = ridge_rel * (scale + 1e-12)
+            # min_Q ||Q M^T - Jbar||_F, written as a solve rather than an inverse.
+            rhs = M.T @ jbar.T
+            q = jnp.linalg.solve(
+                gram + ridge * jnp.eye(gram.shape[0], dtype=gram.dtype), rhs).T
+            oracle_Q.append(q)
+        return self._normalize_learned_Q(params, oracle_Q)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def shared_q_oracle(self, train_state, batch, u0):
+        """Return the per-batch zero-lag shared-Q oracle without changing state."""
+        x = batch[0]
+        _, OL_state, _ = self.model.openloop(train_state.params, u0, x)
+        return self._shared_q_oracle_from_ol_state(train_state.params, OL_state)
+
+    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    def frozen_q_train_step(self, train_state, batch, u0):
+        """Update FF once with the pretrained Q fixed and no noisy Q solve."""
+        x = batch[0]
+        OL_y_pred, OL_state, OL_vf_sol = self.model.openloop(
+            train_state.params, u0, x)
+        return self._clean_ff_phase(
+            train_state, batch, OL_y_pred, OL_state, OL_vf_sol)
+
+    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    def oracle_shared_q_train_step(self, train_state, batch, u0):
+        """Refresh Q to the batch-mean analytic oracle, then update FF once."""
+        x = batch[0]
+        OL_y_pred, OL_state, OL_vf_sol = self.model.openloop(
+            train_state.params, u0, x)
+        oracle_Q = self._shared_q_oracle_from_ol_state(train_state.params, OL_state)
+        train_state = train_state.replace(Q=oracle_Q)
+        return self._clean_ff_phase(
+            train_state, batch, OL_y_pred, OL_state, OL_vf_sol)
+
     def _apply_Q_update(self, train_state, sources, beta=None, pretraining=False):
         """Apply one unconditional Q-optimizer step.
         """
-        if beta is None:
-            beta = self.model.vf.beta
-        effective_beta = 0.0 if self.norm_fb_weights else beta
         q_tx = self._q_optimizer(pretraining=pretraining)
 
-        gQ = self._q_grads(train_state.Q, sources, effective_beta)
+        gQ = self._q_grads(train_state.Q, sources, self._resolve_beta(beta))
         gQ = self._norm_clip_grads(gQ)   # honor norm_grads / clip_grads for Q too
         updates, new_opt_state = q_tx.update(
             gQ, train_state.q_opt_state, train_state.Q)
@@ -458,15 +542,12 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             eps_paths = self._make_eps(x, key, dt=self.fb_learning_dt)
             sources = accumulate_squash_source(
                 self.model, ts.params, x, y_ref, OL_state,
-                list(ts.Q), eps_paths, self.use_fr_error,
+                list(ts.Q), eps_paths,
                 solver=self._noisy_solver_instance(),
                 assembly_current=self._assembly_current_for_fb_learning(),
                 dt=self.fb_learning_dt)
             return self._apply_Q_update(ts, sources)
 
-        # Static fast path preserves the q_update_every=1 operation order. For
-        # sparse updates, gate the entire noisy solve rather than discarding a
-        # source that will never be applied.
         if self.q_update_every == 1:
             train_state = learn_Q(train_state)
         else:
@@ -475,20 +556,8 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
                 do_update, learn_Q, lambda ts: ts, train_state)
 
         # ---- clean closed-loop with the updated Q -> FF (BCP) gradient ----
-        fb_weights = self._learned_fb_weights(train_state, batch)
-        y_targets = self.calculate_targets(OL_y_pred, y)
-        CL_y_pred, CL_state, CL_vf_sol = self.model.closedloop(
-            train_state.params, OL_state, x, y_targets, fb_weights)
-
-        metrics = self.calc_metrics(CL_y_pred, y, train_state, CL_vf_sol)
-
-        train_state = train_state.replace(
-            **self.update_trainstate_params(train_state, OL_vf_sol, x))
-        grads = self.get_gradients(
-            train_state, x, y, OL_y_pred, CL_y_pred, OL_state, CL_state)
-        train_state = self._apply_ff_grads(train_state, grads)
-
-        return train_state, CL_vf_sol, metrics
+        return self._clean_ff_phase(
+            train_state, batch, OL_y_pred, OL_state, OL_vf_sol)
 
     def _assemble_ff_grads(self, params, ff_grad):
         """Convert in-ODE computed FF gradient into params-shaped grad pytree"""
@@ -532,13 +601,23 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
     # Alignment / compliance metrics
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _fb_subspace_alignment_ratio(Q_l, J_l, ridge=1e-6):
-        """FB-subspace alignment: fraction of ||Q_l||_F lying in row(J_l).
+    def _fb_subspace_alignment_energy(Q_l, J_l, ridge_rel=1e-6):
+        """Fraction of ||Q_l||_F^2 lying in row(J_l), i.e. subspace alignment but 
+        with squared ||Q_l||_F
         """
         m = J_l.shape[0]
-        gram = J_l @ J_l.T + ridge * jnp.eye(m, dtype=J_l.dtype)
-        P = J_l.T @ jnp.linalg.solve(gram, J_l)          # [sizes_inh, sizes_inh]
-        return jnp.linalg.norm(Q_l @ P) / (jnp.linalg.norm(Q_l) + 1e-12)
+        gram = J_l @ J_l.T
+        scale = jnp.trace(gram) / m
+        ridge = ridge_rel * (scale + 1e-12)
+        P = J_l.T @ jnp.linalg.solve(
+            gram + ridge * jnp.eye(m, dtype=J_l.dtype), J_l)   # [sizes_inh, sizes_inh]
+        return jnp.sum((Q_l @ P) ** 2) / (jnp.sum(Q_l ** 2) + 1e-12)
+
+    @classmethod
+    def _fb_subspace_alignment_ratio(cls, Q_l, J_l, ridge_rel=1e-6):
+        """FB-subspace alignment: fraction of ||Q_l||_F lying in row(J_l). In [0, 1].
+        """
+        return jnp.sqrt(cls._fb_subspace_alignment_energy(Q_l, J_l, ridge_rel))
 
     def _fb_subspace_alignment_from_projected(self, fb_inh, params, ol_state):
         """alignment of projected Q at an open-loop state.
@@ -555,12 +634,6 @@ class LearnedFeedbackBalanceControlled(BalanceControlled):
             ratios = jax.vmap(lambda Jb: self._fb_subspace_alignment_ratio(fb_l, Jb))(J[l])
             out.append(jnp.mean(ratios))
         return out
-
-    def _fb_subspace_alignment_from_ol(self, Q, params, ol_state):
-        """Backward-compatible learned-Q alignment helper."""
-        vf = self.model.vf
-        fb_inh = vf.apply(params, list(Q), method=vf.fb_from_Q)
-        return self._fb_subspace_alignment_from_projected(fb_inh, params, ol_state)
 
     @partial(jax.jit, static_argnums=(0,))
     def fb_subspace_alignment(self, train_state, batch):

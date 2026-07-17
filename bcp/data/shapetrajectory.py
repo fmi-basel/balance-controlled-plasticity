@@ -11,7 +11,10 @@ import matplotlib.animation as animation
 
 import time
 
-matplotlib.style.use('spiffy')
+try: # optional matplotlib style
+    matplotlib.style.use('spiffy')
+except OSError:
+    pass
 
 
 def embed_trajectory(X, N, key):
