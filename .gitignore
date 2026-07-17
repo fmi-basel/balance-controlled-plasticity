@@ -153,3 +153,9 @@ uv.lock
 sweep_results/
 sweep_results_fmnist/
 sweep_results_fmnist_long_horizon_clipped/
+
+archive/
+
+tests/
+
+learnedFB_optimization/
