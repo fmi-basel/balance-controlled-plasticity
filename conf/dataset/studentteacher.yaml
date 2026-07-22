@@ -8,13 +8,13 @@ _target_: bcp.data.StudentTeacherDataset
 name: StudentTeacher
 task: regression
 
-dim_input: 30
+dim_input: 20
 dim_output: 5
 teacher_hidden: [10, 10, 10]   # teacher net: 30-10-10-10-5
 
 n_train: 500
-n_valid: 500
-n_test: 1000
+n_valid: 100
+n_test: 100
 
 teacher_activation: tanh        # nonlinearity in the teacher's hidden layers
 teacher_gain: 1.0               # weight scale (std of pre-activations)
