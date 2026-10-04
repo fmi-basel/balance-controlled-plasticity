@@ -1,0 +1,16 @@
+# @package _global_
+model:
+  g_EI: 6.0
+  g_XI: 1.0
+  g_EE: 1.25
+  g_II: 0.5
+  eta_EE: 0.002
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/supp_fig3_ee_ii
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

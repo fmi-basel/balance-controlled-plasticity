@@ -144,7 +144,8 @@ class ExcInhAssemblyOnlineLearningVF:
         self.w_ie_pruning_start_iter = int(max(w_ie_pruning_start_iter, 0))
 
         # Override tau_bar with min(tauE, tauI) to match the fastest network
-        # mode under slow inputs.
+        # mode under slow inputs. Valid when the recurrent E->I gain is strong
+        # (g_XI ~ 1); a single leaky integrator matches the initial rise.
         self.tau_bar = min(self.tauE, self.tauI)
 
         # Generate ensemble membership matrices
@@ -164,6 +165,9 @@ class ExcInhAssemblyOnlineLearningVF:
         # I-to-E weights (analytic or optimized depending on overlap)
         self.W_IE = self._init_W_IE(alpha, overlap, w_ie_log_every, self.w_ie_init_mode, w_ie_relu_strength)
         self.W_IE_fixed = self.W_IE
+        self._W_IE_fixed_projected = (
+            None if self.w_ie_pruning else self._project_W_IE(self.W_IE_fixed)
+        )
 
         # Random feedback weights (stored here for accessibility)
         key_FB, rng_key = random.split(rng_key)
@@ -260,6 +264,9 @@ class ExcInhAssemblyOnlineLearningVF:
             return self._project_W_IE(W_IE_override, phase_iter=phase_iter)
         if "W_IE" in state:
             return self._project_W_IE(state["W_IE"], phase_iter=phase_iter)
+        cached = getattr(self, "_W_IE_fixed_projected", None)
+        if cached is not None:
+            return cached
         return self._project_W_IE(self.W_IE_fixed, phase_iter=phase_iter)
 
     def _build_fb_projector(
@@ -403,6 +410,10 @@ class ExcInhAssemblyOnlineLearningVF:
         """Compute all synaptic currents from state and weight matrices."""
         rE = self.actE(state["uE"])
         rI = self.actI(state["uI"])
+        # W_EE / W_II are all-zero when their gain is 0 (and W_EE is not plastic);
+        # skipping the product gives the same zeros without the matmul
+        ee_active = self.g_EE != 0.0 or self.eta_EE != 0.0
+        ii_active = self.g_II != 0.0
         return {
             "rE": rE,
             "rI": rI,
@@ -410,9 +421,8 @@ class ExcInhAssemblyOnlineLearningVF:
             "I_XI": jnp.dot(x, W_XI),
             "I_IE": jnp.dot(rI, W_IE),
             "I_EI": jnp.dot(rE, W_EI),
-            # These are exactly zero when g_EE / g_II = 0
-            "I_EE": jnp.dot(rE, W_EE),
-            "I_II": jnp.dot(rI, W_II),
+            "I_EE": jnp.dot(rE, W_EE) if ee_active else jnp.zeros_like(rE),
+            "I_II": jnp.dot(rI, W_II) if ii_active else jnp.zeros_like(rI),
             "I_EO": jnp.dot(rE, W_EO),
         }
 
@@ -656,6 +666,40 @@ class ExcInhAssemblyOnlineLearningVF:
 
         return delta_state
 
+    def call_fixed_inhibition(self, state, t, data, rI):
+        """Open-loop call with inhibitory rates clamped to rI (ISN test)."""
+        x = data.evaluate(t)
+
+        W_FF, W_OUT, B = state["W_FF"], state["W_OUT"], state["B"]
+        W_FF, B = self._clip_weights(W_FF, B)
+        W_IE = self._resolve_W_IE(state, phase_iter=0)
+
+        W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO, B_E, B_I = self._get_weights(
+            W_FF, W_OUT, B, state["g_EE_A"], W_IE
+        )
+
+        currents = self._compute_currents(
+            state, x, W_XE, W_XI, W_EI, W_IE, W_EE, W_II, W_EO
+        )
+        currents["rI"] = rI
+        currents["I_IE"] = jnp.dot(rI, W_IE)
+        currents["I_II"] = jnp.dot(rI, W_II)
+        delta_state = self._dynamics(
+            state, x, currents, B_E, B_I, jnp.zeros(self.nb_inh), jnp.zeros(self.nb_exc)
+        )
+        delta_state["uI"] = jnp.zeros_like(state["uI"])
+
+        # No controller update, no weight updates
+        delta_state["ctrl"] = self.controller.get_initial_state_onlineVF()
+        delta_state["W_FF"] = jnp.zeros_like(W_FF)
+        delta_state["B"] = jnp.zeros_like(B)
+        delta_state["W_OUT"] = jnp.zeros_like(W_OUT)
+        delta_state["g_EE_A"] = jnp.zeros_like(state["g_EE_A"])
+        if "W_IE" in state:
+            delta_state["W_IE"] = jnp.zeros_like(W_IE)
+
+        return delta_state
+
     def out(self, state):
         return state["uOut"]
 
@@ -748,7 +792,7 @@ class ExcInhAssemblyOnlineLearningVF:
             y = jnp.zeros((inputs.shape[0], self.nb_outputs))
             y_pred = jnp.zeros((inputs.shape[0], self.nb_outputs))
 
-        if W_IE_override is None and "W_IE" not in sol.ys:
+        if W_IE_override is None and "W_IE" not in sol.ys and self.eta_IE != 0.0:
             warnings.warn(
                 "analyze_run() received trajectories without 'W_IE' and no "
                 "W_IE_override; falling back to self.W_IE_fixed for current "

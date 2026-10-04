@@ -1,0 +1,36 @@
+# @package _global_
+defaults:
+  - /dataset: studentteacher
+  - override /model/vf: assemblies-learnedfb
+
+device: cpu
+derive_seeds: True
+jax_threefry_partitionable: True
+batchsize: 20
+epochs: 100
+
+model:
+  dt: 0.01
+  T: 4.0
+  vf:
+    nb_hidden: 3
+    sizes_hidden: [30, 30, 30]
+    nb_exc_per_ensemble: 2
+    EI_ratio: 2.0
+    tauE: 0.02
+    tauOut: 0.02
+    controller:
+      k_p: 0.59
+      k_i: 0.044
+      tau: 0.4
+
+trainer:
+  norm_fb_weights: True
+  clip_params: False
+
+hydra:
+  sweep:
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

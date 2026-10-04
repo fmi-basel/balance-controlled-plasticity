@@ -161,3 +161,5 @@ tests/
 learnedFB_optimization/
 
 data/fashion_mnist/
+
+temp/

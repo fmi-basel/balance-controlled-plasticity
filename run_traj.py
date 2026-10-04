@@ -42,7 +42,7 @@ from diffrax import (
 # LOCAL
 
 from bcp.utils.trajtask_utils import ShapeTrajectoryTask
-from bcp.onlinelearning import SimplePopModel_NoHidden, OnlineLearningMode
+from bcp.onlinelearning import NoHiddenOnlineLearningVF, OnlineLearningMode
 
 # SETUP
 # # # # # # # # # # #
@@ -250,6 +250,9 @@ def main(cfg: DictConfig) -> None:
     # RNG SETUP
     # # # # # # # # # # # # # # # # # # #
 
+    jax.config.update("jax_threefry_partitionable", cfg.jax_threefry_partitionable)
+    logger.info(f"🔑 jax_threefry_partitionable={cfg.jax_threefry_partitionable}")
+
     if not cfg.seed:
         rng = int(time.time())
     else:
@@ -445,7 +448,7 @@ def main(cfg: DictConfig) -> None:
 
         # If the vectorfield has no HL,
         # we only record R2 and loss
-        if isinstance(vf, SimplePopModel_NoHidden):
+        if isinstance(vf, NoHiddenOnlineLearningVF):
             results = {
                 "rec_iters": rec_iters,  # Iterations that are recorded
                 "training_time": rec_iters * cfg.T / 60,  # Training time in minutes
@@ -508,7 +511,7 @@ def main(cfg: DictConfig) -> None:
         return rec_iters, results
 
     def make_empty_results_dict(vf):
-        if isinstance(vf, SimplePopModel_NoHidden):
+        if isinstance(vf, NoHiddenOnlineLearningVF):
             out = {
                 "OL_R2": [],
                 "CL_R2": [],
@@ -568,7 +571,7 @@ def main(cfg: DictConfig) -> None:
 
         # only record everything else if the vector field
         # has a hidden layer (otherwise the results are not there)
-        if not isinstance(vectorfield, SimplePopModel_NoHidden):
+        if not isinstance(vectorfield, NoHiddenOnlineLearningVF):
             # compute mean over time of error in hidden layer
             dict["OL_error"].append(OL_results["error_hidden"].sum(0))
             mean_abs_balance_error = float(

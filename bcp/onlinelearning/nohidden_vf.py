@@ -15,9 +15,9 @@ from ..models.assemblies.utils import (
 # ---------------------------------------------------------------------------
 
 
-class SimplePopModel_NoHidden:
-    # Bit of a hacky and inefficient way of implementing fully linear no-hidden layer
-    # network, but it allows to just swap this class in place of SimplePopModel
+class NoHiddenOnlineLearningVF:
+    """Control network without a hidden layer
+    """
 
     def __init__(
         self,
@@ -38,7 +38,7 @@ class SimplePopModel_NoHidden:
         self.data_dim = data_dim
         self.nb_outputs = nb_outputs
 
-        # Network parameters
+        # Readout and input-trace time constant
         self.tau = tau
 
         # Learning
@@ -69,42 +69,27 @@ class SimplePopModel_NoHidden:
         phase_iter=0,
         W_IE_override=None,
     ):
+        # closedloop, update_wFF/wEE/wIE, phase_iter and W_IE_override have no
+        # counterpart without a hidden layer; they keep the shared signature
         if mode is not None:
             update_wOUT = mode.update_wOUT
 
-        # Evaluate data
         x = data.evaluate(t)
 
-        # Evaluate target and compute output error
         if target is not None:
-            y = target.evaluate(t)
-            y_pred = self.out(state)
-            out_error = y - y_pred
+            out_error = target.evaluate(t) - self.out(state)
         else:
-            y = jnp.zeros(self.nb_outputs)
-            y_pred = jnp.zeros(self.nb_outputs)
             out_error = jnp.zeros(self.nb_outputs)
 
-        # Unpack state
-        u = state["u"]
+        (W,) = self._clip_weights(state["W"])
 
-        # Unpack parameters
-        W = state["W"]
+        delta_state = {
+            "u": 1 / self.tau * (-state["u"] + jnp.dot(x, W)),
+            "eligX": 1 / self.tau * (-state["eligX"] + x),
+        }
 
-        (W,) = self._clip_weights(W)
-
-        # New state
-        delta_state = {}
-
-        delta_state["u"] = 1 / self.tau * (-u + jnp.dot(x, W))
-
-        # presynaptic eligibility traces
-        delta_state["eligR"] = 1 / self.tau * (-state["eligR"] + x)
-
-        # Update params
         if update_wOUT:
-            delta_state["W"] = self.eta * jnp.outer(state["eligR"], out_error)
-
+            delta_state["W"] = self.eta * jnp.outer(state["eligX"], out_error)
         else:
             delta_state["W"] = jnp.zeros_like(W)
 
@@ -113,33 +98,34 @@ class SimplePopModel_NoHidden:
     def out(self, state):
         return state["u"]
 
-    def get_initial_state(self):
-        state = {}
+    def get_initial_state(self, rng_key=None):
+        if rng_key is None:
+            rng_key = self.rng_key
 
-        # Weights
-        key1, key2 = random.split(self.rng_key)
-
-        # Scaling factors
+        key_W, _ = random.split(rng_key)
         w_scale = 2 / self.data_dim
 
-        state["W"] = (
-            random.normal(key1, shape=(self.data_dim, self.nb_outputs)) * w_scale
-        )
-
-        # dynamics
-        state["u"] = jnp.zeros(shape=(1, self.nb_outputs))
-
-        # learning traces
-        state["eligR"] = jnp.zeros(shape=(1, self.data_dim))
-
-        return state
+        return {
+            "W": random.normal(key_W, shape=(self.data_dim, self.nb_outputs)) * w_scale,
+            "u": jnp.zeros(shape=(1, self.nb_outputs)),
+            "eligX": jnp.zeros(shape=(1, self.data_dim)),
+        }
 
     def project_state(self, state, phase_iter=0):
         return state
 
-    def analyze_run(self, inputs, sol, dt, rec_dt, targets=None, closedloop=False):
-        out_dict = sol.ys.copy()
-        out_dict = {key: val.squeeze() for key, val in out_dict.items()}
+    def analyze_run(
+        self,
+        inputs,
+        sol,
+        dt,
+        rec_dt,
+        targets=None,
+        closedloop=False,
+        phase_iter=0,
+        W_IE_override=None,
+    ):
+        out_dict = {key: val.squeeze() for key, val in sol.ys.items()}
 
         # Align inputs and targets with recording times
         if rec_dt != dt:
@@ -149,7 +135,6 @@ class SimplePopModel_NoHidden:
             if targets is not None:
                 targets = targets[::diff]
 
-        # Calculate output error
         if targets is not None:
             y = targets
             y_pred = self.out(out_dict)

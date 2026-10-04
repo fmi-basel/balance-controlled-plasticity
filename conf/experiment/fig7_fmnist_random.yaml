@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - /dataset: fmnist
+  - override /model/vf: assemblies-learnedfb
+
+device: gpu
+jax_threefry_partitionable: True
+
+model:
+  vf:
+    nb_hidden: 3
+
+trainer:
+  feedback_mode: random
+  norm_fb_weights: True
+
+hydra:
+  sweep:
+    dir: out/fig7_fmnist_random
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

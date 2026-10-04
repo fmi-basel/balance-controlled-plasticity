@@ -1,0 +1,19 @@
+# @package _global_
+model:
+  controller:
+    k_p: 20
+  eta_FF: 0.1
+  eta_OUT: 0.02
+  clip_weights: True
+train_iterations: 8640
+rec_activity: False
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/fig5_overlap
+    subdir: overlap${model.overlap}/seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5
+      model.overlap: 0.0,0.1,0.2,0.3,0.4

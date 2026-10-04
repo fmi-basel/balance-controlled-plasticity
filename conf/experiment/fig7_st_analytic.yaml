@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - fig7_st_base
+
+trainer:
+  feedback_mode: analytic
+
+hydra:
+  sweep:
+    dir: out/fig7_st_analytic

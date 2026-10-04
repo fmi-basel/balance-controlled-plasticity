@@ -1,0 +1,15 @@
+# @package _global_
+model:
+  controller:
+    k_p: 1.0
+rec_activity: True
+rec_activity_keys: [fb, OL_freeze, CL_freeze]
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/fig8_fearcond_control
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: range(1,31)

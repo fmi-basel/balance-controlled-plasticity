@@ -79,6 +79,9 @@ class Trainer(flax.struct.PyTreeNode):
     model: Model
     optimizer: GradientTransformation
     loss: Loss
+    # Parameters excluded from training (BPTrainer): 'all_<prefix>' freezes every parameter with a path
+    # component starting with <prefix> (e.g. 'all_hidden'); otherwise comma-separated 'layer/param' paths
+    freeze_keys: Union[None, str] = flax.struct.field(pytree_node=False, default=None)
 
     # TRAIN STATE EXTENSION
     # # # # # # # # # # # # # # # #
@@ -501,6 +504,13 @@ class FeedbackControlTrainer(Trainer):
         pass
         
 
+def _is_frozen(path, freeze_keys):
+    """Whether the parameter at `path` (list of keys) is frozen under `freeze_keys`."""
+    if freeze_keys.startswith("all_"):
+        return any(str(key).startswith(freeze_keys[4:]) for key in path)
+    return "/".join(str(key) for key in path) in freeze_keys.split(",")
+
+
 class BPTrainer(Trainer):
     """
     Backpropagation trainer.
@@ -509,6 +519,11 @@ class BPTrainer(Trainer):
     - No additional parameters in the train_state.
     """
     
+    def mask_frozen(self, grads):
+        """Zero the gradients of frozen parameters (Adam then leaves them unchanged)."""
+        return jax.tree_util.tree_map_with_path(
+            lambda path, g: jnp.zeros_like(g) if _is_frozen([p.key for p in path], self.freeze_keys) else g, grads)
+
     @partial(jax.jit, static_argnums=(0))
     def train_step(self, train_state, batch, vf_state0):
         """
@@ -524,6 +539,9 @@ class BPTrainer(Trainer):
         # GET PARAMETER UPDATES
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
         (loss, (y_pred, vf_sol)), grads = grad_fn(train_state.params)
+
+        if self.freeze_keys is not None:
+            grads = self.mask_frozen(grads)
 
         trainstate_param_updates = self.update_trainstate_params(train_state, vf_sol, batch[0])
         

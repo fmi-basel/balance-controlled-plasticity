@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - /dataset: fmnist
+
+device: gpu
+jax_threefry_partitionable: False
+
+model:
+  vf:
+    nb_hidden: 3
+    controller:
+      k_p: 0.05
+      k_i: 0.1
+
+trainer:
+  feedback_mode: analytic
+  clip_params: True
+  norm_fb_weights: True
+
+hydra:
+  sweep:
+    dir: out/fig6_fmnist_3l
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

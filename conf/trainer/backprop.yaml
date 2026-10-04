@@ -3,3 +3,4 @@ defaults:
   - _self_
 
 _target_: bcp.core.trainer.BPTrainer
+freeze_keys: null 

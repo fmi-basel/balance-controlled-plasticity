@@ -270,6 +270,9 @@ def main(cfg: DictConfig) -> None:
     # RNG SETUP
     # # # # # # # # # # # # # # # # # # #
 
+    jax.config.update("jax_threefry_partitionable", cfg.jax_threefry_partitionable)
+    logger.info("RNG SETUP: jax_threefry_partitionable={}".format(cfg.jax_threefry_partitionable))
+
     if not cfg.seed:
         rng = int(time.time())
     else:

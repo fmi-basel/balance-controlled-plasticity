@@ -24,7 +24,28 @@ import json
 import pandas as pd
 import pickle
 import orbax.checkpoint
+from jax._src.array import _reconstruct_array
 
+
+
+
+def _reconstruct_array_compat(fun, args, arr_state, aval_state):
+    # jax < 0.5 pickled avals with a `named_shape` field that newer jax rejects
+    aval_state = {k: v for k, v in aval_state.items() if k != "named_shape"}
+    return _reconstruct_array(fun, args, arr_state, aval_state)
+
+
+class _CompatUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module == "jax._src.array" and name == "_reconstruct_array":
+            return _reconstruct_array_compat
+        return super().find_class(module, name)
+
+
+def load_pickle_compat(filepath):
+    """pickle.load that also reads jax arrays pickled by jax < 0.5."""
+    with open(filepath, "rb") as f:
+        return _CompatUnpickler(f).load()
 
 
 def dict_from_overrides(filepath):
@@ -128,9 +149,7 @@ class HydraRunOutput:
     
     def load_pickle(self, filename):
         assert self.contains_file(filename), "path does not contain {}.".format(filename)
-        filepath = self.path / filename
-        file = open(filepath, 'rb')
-        return pickle.load(file)
+        return load_pickle_compat(self.path / filename)
     
     def load_trainstate(self, dirname):
         assert self.contains_dir(dirname), "path does not contain {}.".format(dirname)
@@ -160,7 +179,7 @@ class HydraRunOutput:
             if file.suffix == '.json':
                 out.update(json.load(open(file)))
             elif file.suffix == '.pkl':
-                out.update(pickle.load(open(file, 'rb')))
+                out.update(load_pickle_compat(file))
             
         return out
     

@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - fig5_overlap
+
+rec_activity: True
+rec_every_Nth_iter: 120
+
+hydra:
+  sweep:
+    dir: out/fig5_overlap_examples
+  sweeper:
+    params:
+      seed: 2026

@@ -9,7 +9,7 @@ from jax import vmap
 import flax
 
 import diffrax
-from diffrax import PIDController, ConstantStepSize, SteadyStateEvent, ImplicitAdjoint
+from diffrax import PIDController, ConstantStepSize, Event, steady_state_event, ImplicitAdjoint
 from diffrax import diffeqsolve, ODETerm, SaveAt
 
 from typing import Callable, Tuple,Union
@@ -128,7 +128,7 @@ class Model(flax.struct.PyTreeNode):
                 stepsize_ctrl = ConstantStepSize()
                 
             if self.early_termination:
-                event = SteadyStateEvent(rtol=self.rtol, atol=self.atol)
+                event = Event(steady_state_event(rtol=self.rtol, atol=self.atol))
             else:
                 event = None
                 
@@ -140,7 +140,7 @@ class Model(flax.struct.PyTreeNode):
                             dt0=self.dt, 
                             y0=state0,
                             stepsize_controller=stepsize_ctrl,
-                            discrete_terminating_event = event,
+                            event=event,
                             #adjoint=ImplicitAdjoint(),
                             throw=self.throw_on_error)
 

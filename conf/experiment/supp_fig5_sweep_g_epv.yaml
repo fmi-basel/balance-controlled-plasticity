@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - supp_fig5_pv_som_vip
+
+hydra:
+  sweep:
+    dir: out/supp_fig5_sweep_g_epv
+    subdir: epv${model.g_EPV}/seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3
+      model.g_EPV: 0,0.5,1,1.5,2

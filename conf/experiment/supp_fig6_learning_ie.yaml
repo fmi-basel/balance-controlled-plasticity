@@ -1,0 +1,20 @@
+# @package _global_
+
+model:
+  eta_IE: 0.1
+  compute_wIE_method: random_scaled_uniform
+  w_ie_pruning: False
+  w_ie_pruning_thresh: 0.01  # also sets the W_IE init range [thresh, 2 * thresh]
+  w_ie_pruning_start_iter: 720
+training_phases:
+  - {name: wie_pretrain, iterations: 2160, preset: train_wie_only}
+  - {name: main, iterations: 4320, preset: train_full}
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/supp_fig6_learning_ie
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

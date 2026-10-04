@@ -83,8 +83,8 @@ def merge_solutions(s1, s2, s3):
     """
     t0 = s1.t0
     t1 = s3.t1
-    ys = jax.tree_map(lambda a, b, c: jnp.concatenate([a, b, c], axis=0), s1.ys, s2.ys, s3.ys)
-    ts = jax.tree_map(lambda a, b, c: jnp.concatenate([a, b, c], axis=0), s1.ts, s2.ts, s3.ts)
+    ys = jax.tree.map(lambda a, b, c: jnp.concatenate([a, b, c], axis=0), s1.ys, s2.ys, s3.ys)
+    ts = jax.tree.map(lambda a, b, c: jnp.concatenate([a, b, c], axis=0), s1.ts, s2.ts, s3.ts)
 
     return CustomDiffraxSol(t0, t1, ys, ts)
 
@@ -135,7 +135,7 @@ class SimulationRunner:
             max_steps=None
         )
         
-        final_state = jax.tree_map(lambda x: x[-1], sol.ys)
+        final_state = jax.tree.map(lambda x: x[-1], sol.ys)
         logger.debug("Open-loop simulation complete.")
         return final_state, sol
     
@@ -162,12 +162,12 @@ class SimulationRunner:
             stepsize_controller=self.stepsize_controller,
             max_steps=None
         )
-        state = jax.tree_map(lambda x: x[-1], sol_CS.ys)
+        state = jax.tree.map(lambda x: x[-1], sol_CS.ys)
         
         # PHASE 2: US presentation
         # Network behaves as in closed-loop (Feedback control is on)
         def f(t, state, etc):
-            return self.vectorfield(state, t, inputs, targets, True, False, False)
+            return self.vectorfield(state, t, inputs, targets, closedloop=True, update_wFF=False, update_wOUT=False)
         
         saveat_ts = jnp.arange(self.T_CS, self.T_CS + self.T_US, self.rec_dt)
         
@@ -183,12 +183,12 @@ class SimulationRunner:
             stepsize_controller=self.stepsize_controller,
             max_steps=None
         )
-        state = jax.tree_map(lambda x: x[-1], sol_US.ys)
+        state = jax.tree.map(lambda x: x[-1], sol_US.ys)
         
         # PHASE 3: ITI (no CS or US)
         # Network behaves as in open-loop (Feedback control is off)
         def f(t, state, etc):
-            return self.vectorfield(state, t, inputs, None, False, True, False)
+            return self.vectorfield(state, t, inputs, None, closedloop=False, update_wFF=True, update_wOUT=False)
         
         saveat_ts = jnp.arange(self.T_CS + self.T_US, self.T, self.rec_dt)
         
@@ -208,7 +208,7 @@ class SimulationRunner:
         # Concatenate solutions
         sol = merge_solutions(sol_CS, sol_US, sol_ITI)
         
-        final_state = jax.tree_map(lambda x: x[-1], sol_ITI.ys)
+        final_state = jax.tree.map(lambda x: x[-1], sol_ITI.ys)
         logger.debug("Closed-loop simulation complete.")
         return final_state, sol
     
@@ -219,7 +219,7 @@ class SimulationRunner:
         # PHASE 1: CS presentation 
         # Network behaves as in open-loop (Feedback control is off)
         def f(t, state, etc):
-            return self.vectorfield(state, t, inputs, None, False, True, False)
+            return self.vectorfield(state, t, inputs, None, closedloop=False, update_wFF=True, update_wOUT=False)
         
         saveat_ts = jnp.arange(0, self.T_CS, self.rec_dt)
 
@@ -235,12 +235,12 @@ class SimulationRunner:
             stepsize_controller=self.stepsize_controller,
             max_steps=None
         )
-        state = jax.tree_map(lambda x: x[-1], sol_CS.ys)
+        state = jax.tree.map(lambda x: x[-1], sol_CS.ys)
         
         # PHASE 2: US presentation
         # Network behaves as in closed-loop (Feedback control is on)
         def f(t, state, etc):
-            return self.vectorfield(state, t, inputs, targets, True, True, False)
+            return self.vectorfield(state, t, inputs, targets, closedloop=True, update_wFF=True, update_wOUT=False)
         
         saveat_ts = jnp.arange(self.T_CS, self.T_CS + self.T_US, self.rec_dt)
         
@@ -256,12 +256,12 @@ class SimulationRunner:
             stepsize_controller=self.stepsize_controller,
             max_steps=None
         )
-        state = jax.tree_map(lambda x: x[-1], sol_US.ys)
+        state = jax.tree.map(lambda x: x[-1], sol_US.ys)
         
         # PHASE 3: ITI (no CS or US)
         # Network behaves as in open-loop (Feedback control is off)
         def f(t, state, etc):
-            return self.vectorfield(state, t, inputs, None, False, True, False)
+            return self.vectorfield(state, t, inputs, None, closedloop=False, update_wFF=True, update_wOUT=False)
         
         saveat_ts = jnp.arange(self.T_CS + self.T_US, self.T, self.rec_dt)
         
@@ -281,7 +281,7 @@ class SimulationRunner:
         # Concatenate solutions
         sol = merge_solutions(sol_CS, sol_US, sol_ITI)
         
-        final_state = jax.tree_map(lambda x: x[-1], sol_ITI.ys)
+        final_state = jax.tree.map(lambda x: x[-1], sol_ITI.ys)
         logger.debug("Learning iteration complete.")
         return final_state, sol
 
@@ -304,6 +304,9 @@ def main(cfg: DictConfig) -> None:
     # RNG SETUP
     # # # # # # # # # # # # # # # # # # #
     
+    jax.config.update("jax_threefry_partitionable", cfg.jax_threefry_partitionable)
+    logger.info(f"🔑 jax_threefry_partitionable={cfg.jax_threefry_partitionable}")
+
     if not cfg.seed:
         rng = int(time.time())
     else:
@@ -346,13 +349,15 @@ def main(cfg: DictConfig) -> None:
     # # # # # # # # # # # # # # # # # # #
 
     # Upscale output weights
-    state['W_OUT'] *= 10
+    state['W_OUT'] *= 15
     
     # Make sure outputs sum to 0
     state["W_OUT"] = state["W_OUT"] - jnp.mean(state["W_OUT"])
     
     # Shifted and scaled feedforward weights
     state['W_FF'] = state['W_FF'] * 1 + 1 / cfg.task.N
+
+    W_IE_frozen = state.pop("W_IE", None)
     
     # OUTPUT NONLINEARITY
     # # # # # # # # # # # # # # # # # # #
@@ -389,6 +394,23 @@ def main(cfg: DictConfig) -> None:
         
         return state, OL_results, CL_results
     
+    # recorded key -> (run, analyze_run output); 'freeze' is out_nl(uOut)
+    ACTIVITY_KEYS = {
+        "OL_rE": ("OL", "rE"),
+        "CL_rE": ("CL", "rE"),
+        "OL_rI": ("OL", "rI"),
+        "CL_rI": ("CL", "rI"),
+        "I_FF_bar": ("OL", "I_FF_bar"),
+        "OL_I_IE": ("OL", "I_IE"),
+        "CL_I_IE": ("CL", "I_IE"),
+        "OL_uOut": ("OL", "uOut"),
+        "CL_uOut": ("CL", "uOut"),
+        "OL_freeze": ("OL", "freeze"),
+        "CL_freeze": ("CL", "freeze"),
+        "fb": ("CL", "fb"),
+    }
+    activity_keys = list(ACTIVITY_KEYS) if cfg.rec_activity_keys is None else list(cfg.rec_activity_keys)
+
     def make_results_dict(vf):
         logger.debug("Making results dictionary...")
         rec_iters = np.arange(0, cfg.train_iterations+1)
@@ -404,18 +426,8 @@ def main(cfg: DictConfig) -> None:
         
         if cfg.rec_activity:
             logger.info("❗ VF activity recording is on! Brace for large outputs.")
-            results['OL_rE'] = []
-            results['CL_rE'] = []
-            results['OL_rI'] = []
-            results['CL_rI'] = []
-            results['I_FF_bar'] = []
-            results['OL_I_IE'] = []
-            results['CL_I_IE'] = [] 
-            results['OL_uOut'] = []
-            results['CL_uOut'] = []
-            results['OL_freeze'] = []
-            results['CL_freeze'] = []
-            results['fb'] = []
+            for key in activity_keys:
+                results[key] = []
             
         if cfg.rec_weights:
             results['W_FF'] = []
@@ -438,18 +450,11 @@ def main(cfg: DictConfig) -> None:
         dict['CL_error'].append(CL_results['error_hidden'].sum(0))
             
         if cfg.rec_activity:
-            dict['OL_rE'].append(OL_results['rE'])
-            dict['CL_rE'].append(CL_results['rE'])
-            dict['OL_rI'].append(OL_results['rI'])
-            dict['CL_rI'].append(CL_results['rI'])
-            dict['I_FF_bar'].append(OL_results['I_FF_bar'])
-            dict['OL_I_IE'].append(OL_results['I_IE'])
-            dict['CL_I_IE'].append(CL_results['I_IE'])
-            dict['OL_uOut'].append(OL_results['uOut'])
-            dict['CL_uOut'].append(CL_results['uOut'])
-            dict['OL_freeze'].append(out_nl(OL_results['uOut']))
-            dict['CL_freeze'].append(out_nl(CL_results['uOut']))
-            dict['fb'].append(CL_results['fb'])
+            runs = {"OL": OL_results, "CL": CL_results}
+            for key in activity_keys:
+                run, name = ACTIVITY_KEYS[key]
+                value = runs[run]["uOut" if name == "freeze" else name]
+                dict[key].append(out_nl(value) if name == "freeze" else value)
         
         if cfg.rec_weights:
             dict['W_FF'].append(state['W_FF'])
@@ -521,6 +526,8 @@ def main(cfg: DictConfig) -> None:
         pickle.dump(results, f)
         
     logger.info("💾 Saving final state to disk...")
+    if W_IE_frozen is not None:
+        state["W_IE"] = W_IE_frozen
     with open('final_state.pkl', 'wb') as f:
         pickle.dump(state, f)
         

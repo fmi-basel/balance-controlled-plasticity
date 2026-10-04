@@ -1,0 +1,12 @@
+# @package _global_
+model:
+  feedback_to_excitatory: True
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/supp_fig4_fb_to_e
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

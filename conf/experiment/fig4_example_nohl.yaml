@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - fig4_nohl
+
+seed: 2024
+rec_activity: True
+rec_every_Nth_iter: 4320
+
+hydra:
+  run:
+    dir: out/fig4_example_nohl

@@ -11,7 +11,8 @@ out_dir : out/static  # Directory to save model and log files.
 
 # RNG
 seed: False  # Random seed. If False, use random seed
-derive_seeds: False  # If True, derive the teacher/data/vf/Q seeds from `seed` (used for learned Q sims)
+derive_seeds: False 
+jax_threefry_partitionable: True  
 
 # Performance
 device : 'gpu'  # 'cpu' or 'gpu'
@@ -24,8 +25,7 @@ epochs_pretrain_fb: 0   # FF-frozen feedback (Q) pre-training epochs; requires f
 batchsize: 100
 eval_interval: 1
 verbose: True
-OL_eval_on_train: True  # Whether to evaluate on a subset of the training set 
-                        # in open-loop evaluation.
+OL_eval_on_train: True 
 
 # Tracking & Debug options
 batchwise_tracker: False  # Whether to track on a batch-wise basis
