@@ -2,7 +2,7 @@
 
 <img src="bcp-header.png">
 
-Code for all simulations and figures in our paper "Encoding local error signals by breaking the balance of excitation and inhibition". Preprint on [bioRxiv](https://doi.org/10.1101/2025.05.12.653626).
+Code for all simulations and figures in our paper "Encoding local error signals by breaking the balance of excitation and inhibition".
 
 ```bibtex
 @article{rossbroich_breaking_2026,
