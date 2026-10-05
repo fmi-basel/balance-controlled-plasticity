@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - supp_fig5_pv_som_vip
+
+hydra:
+  sweep:
+    dir: out/supp_fig5_sweep_g_somvip
+    subdir: somvip${model.g_SOMVIP}/seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3
+      model.g_SOMVIP: 0,0.2,0.4

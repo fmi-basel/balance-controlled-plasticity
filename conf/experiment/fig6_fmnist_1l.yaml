@@ -1,0 +1,20 @@
+# @package _global_
+# Figure 6 b-j: Fashion-MNIST, 1 hidden layer, analytic feedback, assembly overlap 0-10%, 5 seeds. GPU.
+defaults:
+  - /dataset: fmnist
+
+device: gpu
+jax_threefry_partitionable: False
+
+trainer:
+  feedback_mode: analytic
+  clip_params: True
+
+hydra:
+  sweep:
+    dir: out/fig6_fmnist_1l
+    subdir: overlap${model.vf.overlap}/seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5
+      model.vf.overlap: 0.0,0.02,0.04,0.06,0.08,0.1

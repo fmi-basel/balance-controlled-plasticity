@@ -79,9 +79,6 @@ target/
 profile_default/
 ipython_config.py
 
-# pyenv
-.python-version
-
 # pipenv
 #   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
 #   However, in case of collaboration, if having platform-specific dependencies or dependencies
@@ -97,7 +94,8 @@ celerybeat-schedule
 
 # Environments
 .env
-.venv
+.venv/
+.uv-cache/
 env/
 venv/
 ENV/
@@ -130,6 +128,10 @@ dmypy.json
 out/
 figures/
 
+# Local notebooks
+figure-notebooks/
+dev-notebooks/
+
 # data
 data/mnist/
 data/fmnist/
@@ -139,3 +141,21 @@ data/fmnist/
 
 #.DS_Store files everywhere
 .DS_Store
+
+.mplconfig/
+.claude/
+
+# learned-FB hyperparameter sweep outputs
+sweep_results/
+sweep_results_fmnist/
+sweep_results_fmnist_long_horizon_clipped/
+
+archive/
+
+tests/
+
+learnedFB_optimization/
+
+data/fashion_mnist/
+
+temp/

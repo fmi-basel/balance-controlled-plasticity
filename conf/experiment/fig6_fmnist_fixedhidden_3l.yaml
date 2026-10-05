@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - fig6_fmnist_fixedhidden_1l
+
+model:
+  vf:
+    nb_hidden: 3
+
+hydra:
+  sweep:
+    dir: out/fig6_fmnist_fixedhidden_3l

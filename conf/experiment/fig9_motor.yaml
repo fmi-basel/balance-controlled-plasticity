@@ -1,0 +1,13 @@
+# @package _global_
+rec_activity: True
+rec_activity_keys: [CL_rI, fb, CL_uOut]
+rec_every_Nth_iter: 10
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/fig9_motor_slowlearn
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5,6,7,8,9,10

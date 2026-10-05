@@ -1,0 +1,11 @@
+# @package _global_
+train_readout_only: True
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/fig4_nofb
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

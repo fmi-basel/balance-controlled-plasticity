@@ -1,0 +1,9 @@
+# @package _global_
+seed: 2024
+rec_activity: True
+rec_every_Nth_iter: 120
+jax_threefry_partitionable: False
+
+hydra:
+  run:
+    dir: out/fig4_example

@@ -3,6 +3,7 @@
 
 import pickle
 import os
+import numpy as np
 
 class WeightTracker():
     """ Tracks model weights during training """
@@ -31,9 +32,9 @@ class WeightTracker():
         
         params = state.params['params']
         for paramname in self.paramnames:
-            self.rec[paramname]['kernel'].append(params[paramname]['kernel'])
+            self.rec[paramname]['kernel'].append(np.array(params[paramname]['kernel']))
             if params[paramname].get('bias') is not None:
-                self.rec[paramname]['bias'].append(params[paramname]['bias'])
+                self.rec[paramname]['bias'].append(np.array(params[paramname]['bias']))
             
     def get(self, paramname = None):
         

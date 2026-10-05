@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "balance-controlled-plasticity"
+version = "0.1.0"
+description = "Simulations for Encoding local error signals by breaking the balance of excitation and inhibition"
+readme = "README.md"
+authors = [{name = "Julian Rossbroich"}]
+requires-python = ">=3.11.8,<3.12"
+dependencies = [
+    "cmcrameri>=1.9",
+    "diffrax>=0.7.2",
+    "equinox>=0.13.4",
+    "flax>=0.12.4",
+    "hydra-colorlog>=1.2.0",
+    "hydra-core>=1.3.2",
+    "ipykernel>=7.2.0",
+    "jax>=0.10.2",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.11.1",
+    "numpy>=2.4.6",
+    "omegaconf>=2.3.0",
+    "optax>=0.2.8",
+    "optuna>=4.9.0",
+    "orbax-checkpoint>=0.12.1",
+    "pandas>=3.0.6",
+    "ptitprince>=0.3.1",
+    "pyfonts>=1.2.0",
+    "scikit-learn>=1.5.0",
+    "scipy>=1.17.1",
+    "spiffyplots==0.8.0",
+    "svgpathtools>=1.6.1",
+    "tensorflow>=2.20.0",
+    "tensorflow-datasets>=4.9.7",
+    "tensorflow-metadata>=1.17.2",
+    "tqdm>=4.66.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bcp", "bcp.*"]

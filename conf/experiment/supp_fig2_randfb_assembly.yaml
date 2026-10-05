@@ -1,0 +1,12 @@
+# @package _global_
+model:
+  random_fb_per_ensemble: True
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/supp_fig2_randfb_assembly
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

@@ -49,7 +49,7 @@ def normalize_gradients(grads, norm=1.0):
         scale = jnp.where(grad_norm > 0, norm / grad_norm, 1.0)
         return grad * scale
     
-    normalized_grads = jax.tree_map(normalize_leaf, grads)
+    normalized_grads = jax.tree_util.tree_map(normalize_leaf, grads)
     return normalized_grads
     
 
@@ -66,7 +66,7 @@ def clip_nn_params(params_frozendict, param_min, param_max):
     params_dict = unfreeze(params_frozendict)
     
     # 2) Modify the "params" subtree in place
-    params_dict["params"] = jax.tree_map(
+    params_dict["params"] = jax.tree_util.tree_map(
         lambda x: jnp.clip(x, param_min, param_max),
         params_dict["params"]
     )
@@ -79,6 +79,9 @@ class Trainer(flax.struct.PyTreeNode):
     model: Model
     optimizer: GradientTransformation
     loss: Loss
+    # Parameters excluded from training (BPTrainer): 'all_<prefix>' freezes every parameter with a path
+    # component starting with <prefix> (e.g. 'all_hidden'); otherwise comma-separated 'layer/param' paths
+    freeze_keys: Union[None, str] = flax.struct.field(pytree_node=False, default=None)
 
     # TRAIN STATE EXTENSION
     # # # # # # # # # # # # # # # #
@@ -89,7 +92,7 @@ class Trainer(flax.struct.PyTreeNode):
         """Extended TrainState class that contains additional parameters."""
         pass
     
-    def init_trainstate_params(self, params):
+    def init_trainstate_params(self, params, rng):
         """ Initializes the extra parameters of the train state. """
         return {}
     
@@ -118,31 +121,41 @@ class Trainer(flax.struct.PyTreeNode):
         
         # Split RNG
         rng_data, rng_model = jax.random.split(rng)
-        
+        # Feedback RNG derived from the main seed without disturbing the splits
+        # above (keeps 'analytic' runs byte-identical).
+        rng_fb = jax.random.fold_in(rng, 0xFB)
+
         # We can initialize with a single example because the dynamics are
         # v-mapped over the batch dimension.
         batchsize = None
-        
+
         # Get mock data
         x, y = dataset.get_mock_data(batchsize=batchsize,
                                      rng=rng_data,
                                      flatten=self.model.vf.flatten_input)
-        
+
         # Initialize model parameters
         params = self.model.init(rng_model, x, y)
-                
+
         # Extended train state parameters
         additional_fields = {}
-        additional_fields.update(self.init_trainstate_params(params))
+        additional_fields.update(self.init_trainstate_params(params, rng_fb))
         
         # Initialize train state
         train_state = self.ExtTrainState.create(apply_fn=self.model.apply_fun,
                                                 params = params,
                                                 tx = self.optimizer,
                                                 **additional_fields)
-    
+
         return train_state
-        
+
+    def reset_optimizer(self, train_state):
+        """
+        Reset the (forward-weight) optimizer state.
+        """
+        new_opt_state = train_state.tx.init(train_state.params)
+        return train_state.replace(opt_state=new_opt_state)
+
     # TRAINING
     # # # # # # # # # # # # # # # #
     
@@ -187,7 +200,12 @@ class Trainer(flax.struct.PyTreeNode):
         logger.debug("Appending metrics to list.")
         # compute mean of metrics across each batch in epoch.
         metrics = {k: jnp.mean(jnp.stack(v)) for k, v in metrics.items()}
-        
+
+        # Compute weight norm once per epoch (outside JIT)
+        norms = jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), train_state.params)
+        norms = jnp.concatenate([jnp.reshape(v, (-1,)) for v in jax.tree_util.tree_leaves(norms)])
+        metrics['weight_norm'] = jnp.mean(norms)
+
         return train_state, metrics
         
     @abstractmethod
@@ -300,15 +318,10 @@ class Trainer(flax.struct.PyTreeNode):
             metrics['accuracy'] = self._compute_accuracy(y_pred, y_true)
             
         if sol is not None:
-            norms = jax.tree_util.tree_map(lambda x: jnp.linalg.norm(x), trainstate.params)
-            # concatenate norms to a 1-D array
-            norms = jnp.concatenate([jnp.reshape(v, (-1,)) for v in jax.tree_util.tree_leaves(norms)])
             metrics['avg_solver_steps'] = jnp.mean(sol.stats['num_steps'])
-            metrics['weight_norm'] = jnp.mean(norms)
-            
         else:
             metrics['avg_solver_steps'] = 0
-            metrics['weight_norm'] = 0
+        metrics['weight_norm'] = 0
 
             
         return metrics
@@ -323,6 +336,9 @@ class FeedbackControlTrainer(Trainer):
     - manual gradient computation given the train_state and the steady-state solution
     """
     
+    # Feedback source: 'analytic' (network Jacobian) or 'random' (fixed random FB)
+    feedback_mode: str = "analytic"
+
     # FB weight modifications
     average_fb_weights: bool = False
     clip_fb_weights: bool = False
@@ -397,7 +413,7 @@ class FeedbackControlTrainer(Trainer):
             func = lambda x, y: self.loss.get_nudge_targets(x, y, self.target_nudge)
             return vmap(func)(OL_y_pred, y_true)
 
-    @partial(jax.jit, static_argnums=(0))
+    @partial(jax.jit, static_argnums=(0), donate_argnums=(1,))
     def train_step(self, train_state, batch, u0):
           
         # FORWARD PASS
@@ -412,9 +428,15 @@ class FeedbackControlTrainer(Trainer):
 
         # Calc feedback weights
         logger.debug('calculating feedback weights')
-        fb_weights = self.model.get_fb_weights(train_state.params, 
-                                               OL_state
-                                               )
+        if self.feedback_mode == "random":
+            # Fixed random feedback drawn once at init and stored in train_state
+            bs = batch[0].shape[0]
+            fb_weights = [jnp.broadcast_to(w, (bs,) + w.shape)
+                          for w in train_state.random_fb]
+        else:  # 'analytic' — network Jacobian
+            fb_weights = self.model.get_fb_weights(train_state.params,
+                                                   OL_state
+                                                   )
         fb_weights = self.modify_fb_weights(fb_weights, batch)
 
         # Calc targets
@@ -450,7 +472,7 @@ class FeedbackControlTrainer(Trainer):
             grads = normalize_gradients(grads, 1.0)
             
         if self.clip_grads:
-            grads = jax.tree_map(lambda x: jnp.clip(x, -self.clip_val_grads, self.clip_val_grads), grads)
+            grads = jax.tree_util.tree_map(lambda x: jnp.clip(x, -self.clip_val_grads, self.clip_val_grads), grads)
         
         logger.debug('applying gradients')
         train_state = train_state.apply_gradients(grads=grads)
@@ -470,7 +492,7 @@ class FeedbackControlTrainer(Trainer):
                                                            OL_y_pred, CL_y_pred, OL_state, CL_state)
         
         # take average update across batch dimension
-        grads = jax.tree_map(lambda x: jnp.mean(x, axis=0), grads)
+        grads = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), grads)
         
         return grads
         
@@ -482,6 +504,13 @@ class FeedbackControlTrainer(Trainer):
         pass
         
 
+def _is_frozen(path, freeze_keys):
+    """Whether the parameter at `path` (list of keys) is frozen under `freeze_keys`."""
+    if freeze_keys.startswith("all_"):
+        return any(str(key).startswith(freeze_keys[4:]) for key in path)
+    return "/".join(str(key) for key in path) in freeze_keys.split(",")
+
+
 class BPTrainer(Trainer):
     """
     Backpropagation trainer.
@@ -490,6 +519,11 @@ class BPTrainer(Trainer):
     - No additional parameters in the train_state.
     """
     
+    def mask_frozen(self, grads):
+        """Zero the gradients of frozen parameters (Adam then leaves them unchanged)."""
+        return jax.tree_util.tree_map_with_path(
+            lambda path, g: jnp.zeros_like(g) if _is_frozen([p.key for p in path], self.freeze_keys) else g, grads)
+
     @partial(jax.jit, static_argnums=(0))
     def train_step(self, train_state, batch, vf_state0):
         """
@@ -505,6 +539,9 @@ class BPTrainer(Trainer):
         # GET PARAMETER UPDATES
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
         (loss, (y_pred, vf_sol)), grads = grad_fn(train_state.params)
+
+        if self.freeze_keys is not None:
+            grads = self.mask_frozen(grads)
 
         trainstate_param_updates = self.update_trainstate_params(train_state, vf_sol, batch[0])
         

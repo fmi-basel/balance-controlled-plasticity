@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - fig6_fmnist_bp_1l
+
+model:
+  vf:
+    nb_hidden: 3
+
+hydra:
+  sweep:
+    dir: out/fig6_fmnist_bp_3l

@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - /dataset: fmnist
+  - override /model/vf: fc
+  - override /trainer: backprop
+
+device: gpu
+jax_threefry_partitionable: False
+
+model:
+  vf:
+    nb_hidden: 1
+
+hydra:
+  sweep:
+    dir: out/fig6_fmnist_bp_1l
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

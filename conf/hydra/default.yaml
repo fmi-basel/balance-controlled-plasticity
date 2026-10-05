@@ -7,7 +7,7 @@ run:
 
 sweep:
   dir: ${out_dir}/multirun/${hydra.job.name}
-  subdir: ${hydra.job.override_dirname}/seed=${seed}
+  subdir: job=${hydra.job.num},seed=${seed}
 
 job:
   chdir: True

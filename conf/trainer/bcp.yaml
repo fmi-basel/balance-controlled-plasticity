@@ -2,7 +2,16 @@ defaults:
   - defaults
   - _self_
 
-_target_: bcp.models.assemblies.trainer.BalanceControlled
+_target_: bcp.models.assemblies.trainer_learnedfb.LearnedFeedbackBalanceControlled
+
+# Feedback source:
+#   analytic            (network Jacobian)
+#   random              (fixed random FB)
+#   learned             (learned-singlephase)
+#   learned-singlephase (learned-singlephase)
+#   learned-twophase    (extra phase for FB learning)
+
+feedback_mode: analytic
 
 # FB weight modifications
 average_fb_weights: False
@@ -10,7 +19,7 @@ clip_fb_weights: False
 clip_val: 1.0
 norm_fb_weights: False
 norm_val: 1.0
-clip_params: False
+clip_params: True
 clip_val_params: 1.0
 
 # Gradient norm
@@ -22,7 +31,21 @@ clip_val_grads: 0.1
 strong_fb: True
 target_nudge: 0.015
 
-# Learning rule 
+# Learning rule
 activity_reg_strength: 0.0
 gate_by_derivative: False
 use_fr_error: False
+
+# Learned feedback (Q) — only active when feedback_mode starts with 'learned'
+q_lr: 1e-3            
+q_lr_pretraining: null  
+q_update_every: 1
+q_init_scale: 0.01      
+q_seed: 0
+
+# Fixed-step solver for the noisy feedback dynamics
+noisy_solver: euler
+fb_learning_dt: 1e-2
+
+inject_current_during_fb_learning: False
+fb_learning_current: 1.0

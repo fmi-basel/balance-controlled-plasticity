@@ -59,16 +59,31 @@ class LeakyPIController(Controller):
     leak: float
     tau: float
     
-    def __call__(self, y_pred, y_target, state):
+    def __call__(
+        self,
+        y_pred,
+        y_target,
+        state,
+        *,
+        k_p_override=None,
+        k_i_override=None,
+        tau_override=None,
+        leak_override=None,
+    ):
+
         
         error = self.loss.get_error(y_pred, y_target)
 
         # unpack state
         c_int = state['c_int']
-        c = self.k_i * c_int + self.k_p * error
+        k_p = self.k_p if k_p_override is None else k_p_override
+        k_i = self.k_i if k_i_override is None else k_i_override
+        tau = self.tau if tau_override is None else tau_override
+        leak = self.leak if leak_override is None else leak_override
+        c = k_i * c_int + k_p * error
 
         # update 
-        delta_c_int = 1 / self.tau * (error - self.leak * c_int)
+        delta_c_int = 1 / tau * (error - leak * c_int)
         
         # pack state
         delta_state = {'c_int': delta_c_int}

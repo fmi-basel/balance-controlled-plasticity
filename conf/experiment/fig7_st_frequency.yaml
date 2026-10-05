@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - fig7_st_learned
+
+hydra:
+  sweep:
+    dir: out/fig7_st_frequency
+    subdir: q${trainer.q_update_every}/seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3
+      trainer.q_update_every: 1,5,10,50,100

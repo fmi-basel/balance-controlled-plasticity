@@ -9,7 +9,7 @@ from jax import vmap
 import flax
 
 import diffrax
-from diffrax import PIDController, ConstantStepSize, SteadyStateEvent, ImplicitAdjoint
+from diffrax import PIDController, ConstantStepSize, Event, steady_state_event, ImplicitAdjoint
 from diffrax import diffeqsolve, ODETerm, SaveAt
 
 from typing import Callable, Tuple,Union
@@ -128,7 +128,7 @@ class Model(flax.struct.PyTreeNode):
                 stepsize_ctrl = ConstantStepSize()
                 
             if self.early_termination:
-                event = SteadyStateEvent(rtol=self.rtol, atol=self.atol)
+                event = Event(steady_state_event(rtol=self.rtol, atol=self.atol))
             else:
                 event = None
                 
@@ -140,13 +140,13 @@ class Model(flax.struct.PyTreeNode):
                             dt0=self.dt, 
                             y0=state0,
                             stepsize_controller=stepsize_ctrl,
-                            discrete_terminating_event = event,
+                            event=event,
                             #adjoint=ImplicitAdjoint(),
                             throw=self.throw_on_error)
 
             # Remove time dimension from solution
             # Hacky way to replace sol.ys because sol is immutable 
-            object.__setattr__(sol, 'ys', jax.tree_map(lambda x: x.squeeze(axis=0), sol.ys))            
+            object.__setattr__(sol, 'ys', jax.tree_util.tree_map(lambda x: x.squeeze(axis=0), sol.ys))            
             
             state = sol.ys
 
@@ -189,7 +189,7 @@ class Model(flax.struct.PyTreeNode):
         traj_OL, sol_OL = self.traj_openloop(params, x)    
 
         # Extract final state
-        final_state_OL = jax.tree_map(lambda x: x[:,-1,:], traj_OL)
+        final_state_OL = jax.tree_util.tree_map(lambda x: x[:,-1,:], traj_OL)
         
         # Calculate feedback weights
         fb_weights = self.get_fb_weights(params, 
@@ -200,7 +200,7 @@ class Model(flax.struct.PyTreeNode):
         traj_CL, sol_CL = self.traj_closedloop(params, x, y, fb_weights, final_state_OL)    
 
         # Concatenate OL and CL solutions
-        traj = jax.tree_map(lambda x, y: jnp.concatenate((x, y), axis=1), traj_OL, traj_CL)
+        traj = jax.tree_util.tree_map(lambda x, y: jnp.concatenate((x, y), axis=1), traj_OL, traj_CL)
 
         return traj
     

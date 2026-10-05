@@ -38,7 +38,7 @@ class VectorField(nn.Module):
         """ Get initial vdf state expanded along the batch dimension """
         batchsize = x.shape[0]
         state0 = self.get_initial_state(x)
-        return jax.tree_map(lambda x: jnp.expand_dims(x, axis=0).repeat(batchsize, axis=0), state0)
+        return jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0).repeat(batchsize, axis=0), state0)
 
     @abstractmethod
     def out(self, sol: Tuple):

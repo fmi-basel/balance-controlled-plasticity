@@ -1,0 +1,48 @@
+defaults:
+  - activation/relu@actE
+  - activation/relu@actI
+  - controller: leaky-pi
+  - defaults
+  - _self_
+
+_target_: bcp.models.assemblies.vf_learnedfb.LearnedFeedbackAssemblyVectorField
+
+# RNG KEY FOR MEMBERSHIP
+RNG_Key: ${seed}
+
+# Architecture
+nb_hidden: 1
+sizes_hidden: [128]
+use_bias: True
+nb_exc_per_ensemble: 16
+EI_ratio: 4.0
+
+# Dynamics
+fb_to_readout: True
+tauI: 10e-3
+tauE: 30e-3
+tauOut: 30e-3
+
+# Initialization
+FF_init: 'default'
+
+# EI connectivity
+overlap: 0.0
+g_EI: 'default'
+g_XI: 1.0
+g_EE: 0.0
+g_II: 0.0
+alpha: 0.5
+
+# Jacobian
+inh_deriv_in_jac: True
+
+
+sigma: 1.0 #[0.65, 1.01, 2.14]             
+tau_eps: 0.15 # [0.189, 0.107, 0.030]           
+tau_filt: 4.0           
+beta: 0.0               
+signal_source: membrane   # 'membrane' = u_inh - low-pass(u_inh)  [the real circuit]
+                          # 'compartment' = noise - Qc            [idealised oracle: no tauI
+                          
+t_settle: 0.1             # gate Q-source accumulation to t > t_settle

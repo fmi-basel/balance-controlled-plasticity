@@ -1,134 +1,62 @@
-# Breaking Balance: Encoding local error signals in perturbations of excitation–inhibition balance
+# Encoding local error signals by breaking the balance of excitation and inhibition
 
 <img src="bcp-header.png">
 
-This repository contains all code and scripts used to generate the numerical results and figures in our preprint
-[**"Breaking Balance: Encoding local error signals in perturbations of excitation–inhibition balance"**](https://doi.org/10.1101/2025.05.12.653626).
-
-![Build Status](https://img.shields.io/badge/status-preprint-yellow)
-[![bioRxiv preprint](https://img.shields.io/badge/bioRxiv-link-blue)](https://doi.org/10.1101/2025.05.12.653626)
-
----
-
-## BibTex Citation
-
-If you use any of this code or build upon this work, please cite:
+Code for all simulations and figures in our paper "Encoding local error signals by breaking the balance of excitation and inhibition".
 
 ```bibtex
-@article{rossbroich_breaking_2025,
-  title={Breaking Balance: Encoding local error signals in perturbations of excitation–inhibition balance},
+@article{rossbroich_breaking_2026,
+  title={Encoding local error signals by breaking the balance of excitation and inhibition},
   author={Julian Rossbroich and Friedemann Zenke},
-  year={2025},
-  eprint={2025.05.12.653626},
-  archivePrefix={bioRxiv},
-  journal={bioRxiv},
-  doi={10.1101/2025.05.12.653626}
+  year={2026},
+  journal={Nature Communications},
 }
 ```
-## Installation
 
-Follow these steps to reproduce our results in a clean Python 3.11.8 environment. This project relies on **JAX** and **Diffrax** for JIT-compiled ODE solving. 
-For large-scale simulations (e.g., vision benchmarks), GPU support is required.
+## Install
 
-### Prerequisites
+#### Option 1: `uv`
 
-* **Python**: 3.11.8
-* **CUDA**/CUDNN: Match your hardware (see [JAX install guide](https://github.com/google/jax#installation)).
-
----
-
-### Option 1: Conda Environment
-
-Create and activate a new environment from our `environment.yml`:
-```bash
-conda env create --file environment.yml --name <YOUR_ENV_NAME>
-conda activate <YOUR_ENV_NAME>
-```
-Replace `<YOUR_ENV_NAME>` with your preferred environment name.
-
----
-
-### Option 2: pip
-
-In a fresh Python 3.11.8 venv, install dependencies:
+We use [uv](https://docs.astral.sh/uv/). From the repo root:
 
 ```bash
-pip install -r requirements.txt
+uv sync --locked
 ```
 
----
+This creates `.venv/` with Python 3.11.8, installs `bcp` in editable mode, and installs the dependencies in `uv.lock`. Run scripts with `uv run python run_traj.py ...` or activate the venv first.
 
-### Local `bcp` package
+#### Option 2: `venv` and `pip`
 
-Install the local code in `bcp/` in edit mode:
-```
-pip install -e .
-```
-Or make sure that the project root's `bcp/` folder is on `PYTHONPATH`.
+A plain Python 3.11 venv works too:
 
----
-
-### JAX & CUDA Compatibility
-
-We pin to specific versions to maintain compatibility with the dependencies we use
-
-* `jax`      : 0.4.25
-* `jaxlib`   : 0.4.25
-* CUDA plugin: 11.8
-
-> **Note:** Newer JAX releases may break legacy `diffrax`/`flax` APIs. Ensure your CUDA/CUDNN build matches these versions. You might need to change to the CUDA 12 plugin.
-
-For detailed GPU installation instructions, refer to the official [JAX installation guide](https://github.com/google/jax#installation).
-
-
-## Usage examples
-
-We provide a number of jupyter notebooks and scripts to replicate the numerical results presented in the paper.
-We use [`hydra`](https://github.com/facebookresearch/hydra) for experiment logging and configuration. 
-Refer to the commands [simulations.md](simulations.md) file to find the exact commands replicating the results from the paper.
-
-### Figures 2 & 3: Single assembly experiments
-
-All figure panels containing simulation results in Figures 2 & 3 can be replicated by running the corresponding figure notebook inside the `notebooks` folder.
-
-### Figures 4, 5 and S2: Trajectory learning
-
-Simulations for the trajectory learning task are run by calling the `run_traj.py` script:
-```
-python run_traj.py vf.perc_overlap=0
-```
-where the `vf.perc_overlap` argument refers to the percentage of assembly overlap (see main text).
-
-### Figure 6: Fashion-MNIST
-
-To train networks with multiple hidden layers on Fashion-MNIST, run the `run_static.py` script. For example,
-```
-python run_static.py +dataset=fmnist model.vf.nb_hidden=1 epochs=50
-```
-trains a network with a single hidden layer for 50 epochs.
-Please refer to the [simulations.md](simulations.md) file for the exact commands we used to generate the data reported the paper.
-
-### Figure 7: Fear conditioning task
-To train E/I assembly networks on a task mimicking fear conditioning in the BLA (see [Krabbe et al., 2019](https://www.nature.com/articles/s41593-019-0508-y)), use the `run_fearcond.py` script.
-```
-python run_fearcond.py 
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt -e .
 ```
 
-### Figure 8: Motor learning task
+**GPU runs:** Both options install CPU JAX by default. On Linux with an NVIDIA GPU, add the CUDA 12 packages while retaining the locked JAX version:
 
-To train E/I assembly networks on a task mimicking the motor learning task described in [Ren et al., 2022](https://doi.org/10.1016/j.neuron.2022.04.031)), use the `run_motor.py` script:
+```bash
+# uv environment; use uv run --no-sync for GPU scripts
+uv pip install -c requirements.txt "jax[cuda12]"
+
+# pip environment
+python -m pip install -c requirements.txt "jax[cuda12]"
 ```
-python run_motor.py 
-```
 
-### Changing simulation parameters
-In general, all relevant simulation parameters can be be overridden using the same syntax as above or by changing the relevant configuration files in the `conf` directory (refer to the [hydra documentation]( https://hydra.cc/) for details).
+See the [JAX install guide](https://docs.jax.dev/en/latest/installation.html) for driver requirements.
 
-## Hardware & Performance
+## Reproducing the figures
 
-- **GPU:** NVIDIA card with CUDA ≥ 11.3 and ≥ 16 GB memory recommended. We used NVIDIA RTX A4000 and Quadro RTX 5000 GPUs.
-- **RAM**: ≥ 16 GB for large simulations
+Every figure has a notebook in `notebooks/` that reads simulation output from `out/` and writes figure PDFs to `figures/`. There are two ways to get the data:
+
+1. **Run the simulations yourself.** [simulations.md](simulations.md) lists the exact command for every figure. Configs live in `conf/` (we use [Hydra](https://hydra.cc/)) if you want to change hyperparameters.
+2. **Download precomputed simulation output.** The full `out/` folder is available at [LINK TBD](#). Unpack it into the repo root and run the notebooks.
+
+Most simulations run fine on a CPU and take minutes to days. Figures 6 and 7 need a GPU (we used NVIDIA RTX A4000 and Quadro RTX 5000, 16 GB) and several days to run in full.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT, see [LICENSE](LICENSE).

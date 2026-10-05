@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - override /model: onlinelearning-traj-nohidden
+
+train_readout_only: True
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/fig4_nohl
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5

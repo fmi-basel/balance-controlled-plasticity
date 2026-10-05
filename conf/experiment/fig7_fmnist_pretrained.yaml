@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - fig7_fmnist_learned
+
+trainer:
+  q_lr: 0.0
+
+hydra:
+  sweep:
+    dir: out/fig7_fmnist_pretrained

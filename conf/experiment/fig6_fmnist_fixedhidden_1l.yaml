@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - fig6_fmnist_bp_1l
+
+trainer:
+  freeze_keys: all_hidden
+
+hydra:
+  sweep:
+    dir: out/fig6_fmnist_fixedhidden_1l

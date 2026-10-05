@@ -7,6 +7,7 @@ out_dir : out/motor  # Directory to save model and log files.
 
 # RNG
 seed: False  # Random seed. If False, use random seed
+jax_threefry_partitionable: False  # old jax RNG behavior
 
 # Performance
 device : 'cpu'  # 'cpu' or 'gpu'
@@ -17,12 +18,12 @@ T: 8      # Time per pairing in seconds
 dt: 1e-3  # Time step in seconds
 
 # Important simulation parameters
-perc_random_memb: 0.0   # Percentage of random memberships
 train_iterations: 2000  # Number of pairings to train on
 
 # Recording
 rec_dt: ${dt}
 rec_activity: True
+rec_activity_keys: null  # subset of recorded activity (e.g. [CL_rI, fb, CL_uOut]); null records all
 rec_weights: False
 rec_every_Nth_iter: 10  # Record every Nth iteration
 

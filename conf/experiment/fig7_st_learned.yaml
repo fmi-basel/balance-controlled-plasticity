@@ -1,0 +1,20 @@
+# @package _global_
+
+defaults:
+  - fig7_st_base
+
+epochs_pretrain_fb: 20
+
+model:
+  vf:
+    sigma: [0.85, 1.34, 2.83]
+    tau_eps: [0.189, 0.107, 0.03]
+
+trainer:
+  feedback_mode: learned-twophase
+  q_lr: 0.0005
+  q_lr_pretraining: 0.005
+
+hydra:
+  sweep:
+    dir: out/fig7_st_learned

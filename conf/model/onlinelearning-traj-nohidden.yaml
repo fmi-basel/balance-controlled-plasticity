@@ -1,0 +1,7 @@
+_target_: bcp.onlinelearning.NoHiddenOnlineLearningVF
+
+data_dim: 20
+nb_outputs: 2
+
+tau: 30e-3   
+eta: 0.002   

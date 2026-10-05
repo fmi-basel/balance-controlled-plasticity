@@ -1,0 +1,7 @@
+defaults:
+  - defaults
+  - _self_
+
+_target_: bcp.models.fc.NoHLVectorField
+
+use_bias: True

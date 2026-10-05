@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - /dataset: fmnist
+  - override /model/vf: noHL
+  - override /trainer: backprop
+
+device: gpu
+jax_threefry_partitionable: False
+
+hydra:
+  sweep:
+    dir: out/fig6_fmnist_nohl
+    subdir: seed${seed}
+  sweeper:
+    params:
+      seed: 1,2,3,4,5
