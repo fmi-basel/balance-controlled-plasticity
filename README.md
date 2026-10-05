@@ -20,21 +20,33 @@ Code for all simulations and figures in our paper "Encoding local error signals 
 We use [uv](https://docs.astral.sh/uv/). From the repo root:
 
 ```bash
-uv sync
+uv sync --locked
 ```
 
-This creates `.venv/` with Python 3.11.8 and the exact versions in `uv.lock` (JAX, diffrax, flax, Hydra, ...). Run scripts with `uv run python run_traj.py ...` or activate the venv first.
+This creates `.venv/` with Python 3.11.8, installs `bcp` in editable mode, and installs the dependencies in `uv.lock`. Run scripts with `uv run python run_traj.py ...` or activate the venv first.
 
 #### Option 2: `venv` and `pip`
 
-A plain venv works too:
+A plain Python 3.11 venv works too:
 
 ```bash
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e .
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt -e .
 ```
 
-**Important:** For** GPU runs, install the CUDA build of JAX on top, e.g. `pip install "jax[cuda12]"` (see the [JAX install guide](https://docs.jax.dev/en/latest/installation.html)).
+**GPU runs:** Both options install CPU JAX by default. On Linux with an NVIDIA GPU, add the CUDA 12 packages while retaining the locked JAX version:
+
+```bash
+# uv environment; use uv run --no-sync for GPU scripts
+uv pip install -c requirements.txt "jax[cuda12]"
+
+# pip environment
+python -m pip install -c requirements.txt "jax[cuda12]"
+```
+
+See the [JAX install guide](https://docs.jax.dev/en/latest/installation.html) for driver requirements.
 
 ## Reproducing the figures
 

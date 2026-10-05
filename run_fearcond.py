@@ -50,6 +50,7 @@ from diffrax import (
 # PLOTTING
 import matplotlib as mpl 
 import matplotlib.pyplot as plt
+import spiffyplots  # Register packaged Matplotlib styles.
 mpl.use('Agg') # non-interactive mpl backend
 mpl.style.use('spiffy')
 
@@ -537,4 +538,3 @@ def main(cfg: DictConfig) -> None:
         
 if __name__ == "__main__":
     main()
-    
